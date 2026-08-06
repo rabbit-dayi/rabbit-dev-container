@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rabbit Dev Container | 环境变量管理</title>
+  <style>
+    :root { color: #202522; background: #f4f6f3; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; letter-spacing: 0; }
+    body { min-height: 100vh; margin: 0; }
+    .topbar { min-height: 58px; border-bottom: 1px solid #303632; color: #f7faf7; background: #1c211e; }
+    .topbar-inner { width: min(100% - 32px, 1120px); min-height: 58px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 750; }
+    .mark { position: relative; display: grid; width: 32px; height: 30px; place-items: center; border: 1px solid #8bc8a7; border-radius: 11px; color: #215e44; background: #e8f7ee; box-shadow: inset 0 1px 0 #ffffff; }
+    .mark::before, .mark::after { position: absolute; top: -7px; width: 8px; height: 14px; border: 1px solid #8bc8a7; border-radius: 9px 9px 4px 4px; background: #f7fffa; content: ''; }
+    .mark::before { left: 7px; transform: rotate(-13deg); }
+    .mark::after { right: 7px; transform: rotate(13deg); }
+    .rabbit-face { position: relative; z-index: 1; transform: translateY(1px); font: 17px/1 system-ui, sans-serif; }
+    .topbar small { color: #bcc5bf; }
+    main { width: min(100% - 32px, 1120px); margin: 0 auto; padding: 32px 0 48px; }
+    header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 26px; }
+    .eyebrow { margin: 0 0 7px; color: #27795f; font-size: 12px; font-weight: 750; text-transform: uppercase; }
+    h1, h2, p { margin-top: 0; }
+    h1 { margin-bottom: 0; font-size: 30px; line-height: 1.2; }
+    h2 { margin-bottom: 16px; font-size: 16px; }
+    .state { display: inline-flex; align-items: center; gap: 8px; min-height: 30px; color: #526059; font-size: 13px; }
+    .state::before { width: 8px; height: 8px; border-radius: 50%; background: #8a958e; content: ''; }
+    .state.ready::before { background: #22a06b; }
+    .state.error { color: #a33c35; }
+    .state.error::before { background: #d55248; }
+    .section { margin-bottom: 18px; border: 1px solid #d2d9d4; border-radius: 8px; background: #fff; }
+    .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 18px 22px 0; }
+    .section-head span { color: #758079; font-size: 12px; }
+    .settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin-top: 16px; background: #e7ece8; border-top: 1px solid #e7ece8; }
+    .setting { min-width: 0; padding: 18px 22px; background: #fff; }
+    label { display: grid; gap: 8px; color: #46514b; font-size: 13px; font-weight: 700; }
+    label > span { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .key { color: #26302a; font: 13px ui-monospace, monospace; overflow-wrap: anywhere; }
+    .source { flex: 0 0 auto; padding: 3px 7px; border: 1px solid #c8d3cc; border-radius: 4px; color: #557064; background: #f4f8f5; font-size: 11px; font-weight: 600; }
+    input, select { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid #c4cdc7; border-radius: 5px; color: #252b27; background: #fafcf9; font: 14px ui-monospace, monospace; }
+    input:focus, select:focus { border-color: #27795f; outline: 2px solid #bfe3d2; outline-offset: 1px; }
+    .description { min-height: 32px; margin: 8px 0 0; color: #738078; font-size: 12px; line-height: 1.5; }
+    .secret-row { display: flex; align-items: center; gap: 8px; }
+    .secret-row input { min-width: 0; }
+    .clear-secret { min-height: 40px; padding: 7px 10px; border: 1px solid #c4cdc7; border-radius: 5px; color: #59655e; background: #fff; font: 12px system-ui, sans-serif; cursor: pointer; }
+    .clear-secret.active { border-color: #bd5b52; color: #a33c35; background: #fff5f3; }
+    .footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px 22px; border-top: 1px solid #e7ece8; }
+    .message { min-height: 20px; margin: 0; color: #5b6660; font-size: 13px; line-height: 1.5; }
+    .message.error { color: #a33c35; }
+    button.primary { min-height: 42px; padding: 9px 16px; border: 1px solid #1d7659; border-radius: 6px; color: #fff; background: #1d7659; font: inherit; font-weight: 750; cursor: pointer; }
+    button.primary:hover, button.primary:focus-visible { background: #155e46; outline: 2px solid #a9d9c7; outline-offset: 2px; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .results { display: grid; gap: 7px; margin: 0 22px 18px; }
+    .result { padding: 9px 11px; border-left: 3px solid #8a958e; color: #536159; background: #eef3ef; font-size: 13px; }
+    .result.reloaded, .result.saved { border-left-color: #22a06b; }
+    .result.error, .result.restart_required { border-left-color: #d55248; color: #8f3d37; background: #fff4f2; }
+    .loading { padding: 28px 22px; color: #68736d; font-size: 13px; }
+    @media (max-width: 720px) {
+      main, .topbar-inner { width: min(100% - 24px, 1120px); }
+      main { padding-top: 24px; }
+      header { align-items: flex-start; flex-direction: column; gap: 12px; }
+      .settings { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 460px) {
+      .section-head, .setting, .footer { padding-left: 16px; padding-right: 16px; }
+      .footer { align-items: stretch; flex-direction: column; }
+      .results { margin-left: 16px; margin-right: 16px; }
+      button.primary { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar"><div class="topbar-inner"><div class="brand"><span class="mark" aria-hidden="true"><span class="rabbit-face">🐰</span></span><span>Rabbit Dev Container</span></div><small>Environment manager</small></div></div>
+  <main>
+    <header><div><p class="eyebrow">Runtime control</p><h1>环境变量管理</h1></div><span id="state" class="state">正在读取</span></header>
+    <form id="config-form">
+      <div id="sections"><div class="section loading">正在读取配置...</div></div>
+      <div class="section">
+        <div class="footer"><p id="message" class="message"></p><button class="primary" id="save" type="submit">保存并重载</button></div>
+        <div id="results" class="results" hidden></div>
+      </div>
+    </form>
+  </main>
+  <script>
+    const form = document.getElementById('config-form');
+    const sections = document.getElementById('sections');
+    const state = document.getElementById('state');
+    const message = document.getElementById('message');
+    const results = document.getElementById('results');
+    const save = document.getElementById('save');
+    let settings = [];
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+    }
+    function sourceName(value) { return ({managed:'面板', environment:'环境', default:'默认'}[value] || value); }
+    function inputFor(setting) {
+      const value = setting.secret ? '' : setting.value;
+      if (['CODE_SERVER_AUTH', 'TS_ENABLE', 'TS_AUTH_ONCE', 'TS_ACCEPT_DNS'].includes(setting.name)) {
+        const values = setting.name === 'CODE_SERVER_AUTH' ? ['password', 'none'] : ['true', 'false'];
+        return `<select data-key="${escapeHtml(setting.name)}">${values.map((option) => `<option value="${option}" ${value === option ? 'selected' : ''}>${option}</option>`).join('')}</select>`;
+      }
+      if (setting.secret) {
+        const placeholder = setting.value_set ? '********  已设置，留空表示不修改' : '未设置';
+        return `<div class="secret-row"><input data-key="${escapeHtml(setting.name)}" type="password" autocomplete="new-password" placeholder="${placeholder}"><button class="clear-secret" type="button" data-clear="${escapeHtml(setting.name)}">清除</button></div>`;
+      }
+      return `<input data-key="${escapeHtml(setting.name)}" value="${escapeHtml(value)}" autocomplete="off">`;
+    }
+    function render() {
+      const groups = [...new Set(settings.map((setting) => setting.group))];
+      sections.innerHTML = groups.map((group) => `<section class="section"><div class="section-head"><h2>${escapeHtml(group)}</h2><span>${settings.filter((item) => item.group === group).length} 项</span></div><div class="settings">${settings.filter((item) => item.group === group).map((setting) => `<div class="setting"><label><span><span class="key">${escapeHtml(setting.name)}</span><span class="source">${sourceName(setting.source)}</span></span>${inputFor(setting)}</label><p class="description">${escapeHtml(setting.description)}${setting.reload === 'restart' ? ' 保存后需要重启容器。' : ''}</p></div>`).join('')}</div></section>`).join('');
+      sections.querySelectorAll('[data-clear]').forEach((button) => button.addEventListener('click', () => button.classList.toggle('active')));
+    }
+    function setState(text, kind) { state.textContent = text; state.className = `state ${kind || ''}`; }
+    function showError(error) { message.textContent = error; message.className = 'message error'; setState('读取失败', 'error'); }
+    async function load() {
+      try {
+        const response = await fetch('api/config', {cache: 'no-store'});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        settings = data.settings;
+        render();
+        setState('已连接', 'ready');
+      } catch (error) { showError(error.message); sections.innerHTML = '<div class="section loading">配置读取失败</div>'; }
+    }
+    function collect() {
+      const values = {};
+      const clear = [];
+      sections.querySelectorAll('[data-key]').forEach((input) => {
+        const setting = settings.find((item) => item.name === input.dataset.key);
+        if (setting.secret) {
+          if (input.value !== '') values[setting.name] = input.value;
+          const clearButton = sections.querySelector(`[data-clear="${setting.name}"]`);
+          if (clearButton && clearButton.classList.contains('active')) clear.push(setting.name);
+        } else values[setting.name] = input.value;
+      });
+      return {values, clear};
+    }
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      save.disabled = true; message.className = 'message'; message.textContent = '正在保存...'; results.hidden = true;
+      try {
+        const response = await fetch('api/config', {method: 'PUT', headers: {'Content-Type': 'application/json', 'X-Requested-With': 'docker-image-env-manager'}, body: JSON.stringify(collect())});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        settings = data.config.settings; render();
+        results.innerHTML = data.reloads.map((item) => `<div class="result ${escapeHtml(item.status)}"><strong>${escapeHtml(item.service)}</strong> ${escapeHtml(item.message || item.status)}</div>`).join('');
+        results.hidden = false; message.textContent = '配置已保存'; setState('已连接', 'ready');
+      } catch (error) { message.textContent = error.message; message.className = 'message error'; }
+      save.disabled = false;
+    });
+    load();
+  </script>
+</body>
+</html>

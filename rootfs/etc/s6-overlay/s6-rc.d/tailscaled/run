@@ -1,0 +1,24 @@
+#!/bin/bash
+set -e
+
+if [ -r /usr/local/bin/load-managed-env ]; then
+    source /usr/local/bin/load-managed-env
+fi
+
+if [ "${TS_ENABLE:-false}" != "true" ]; then
+    echo "[tailscaled] Disabled. Set TS_ENABLE=true to enable Tailscale."
+    exec sleep infinity
+fi
+
+state_dir="${TS_STATE_DIR:-/root/.rabbit-dev-container/tailscale}"
+mkdir -p /run/tailscale "$state_dir"
+chmod 700 "$state_dir" 2>/dev/null || true
+
+if [ ! -c /dev/net/tun ]; then
+    echo "[tailscaled] /dev/net/tun is unavailable; Tailscale will stay idle." >&2
+    exec sleep infinity
+fi
+
+exec /usr/sbin/tailscaled \
+    --state="$state_dir/tailscaled.state" \
+    --socket=/run/tailscale/tailscaled.sock

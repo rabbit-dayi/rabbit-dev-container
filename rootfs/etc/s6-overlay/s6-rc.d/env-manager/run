@@ -1,0 +1,13 @@
+#!/bin/bash
+set -e
+
+if [ -r /usr/local/bin/load-managed-env ]; then
+    source /usr/local/bin/load-managed-env
+fi
+
+if [ "${ENV_MANAGER_ENABLE:-true}" != true ]; then
+	echo "[env-manager] Disabled. Set ENV_MANAGER_ENABLE=true to enable the environment manager."
+    exec sleep infinity
+fi
+
+exec /usr/local/bin/docker-image-env-manager

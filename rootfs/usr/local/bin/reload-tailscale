@@ -1,0 +1,17 @@
+#!/bin/bash
+set -u
+
+if [ -r /usr/local/bin/load-managed-env ]; then
+    source /usr/local/bin/load-managed-env
+fi
+
+if [ -x /command/s6-svc ]; then
+    /command/s6-svc -r /run/service/tailscaled >/dev/null 2>&1 || true
+fi
+
+if [ -x /command/s6-rc ]; then
+    /command/s6-rc -d change tailscale-config >/dev/null 2>&1 || true
+    if [ "${TS_ENABLE:-false}" = true ]; then
+        /command/s6-rc -u change tailscale-config >/dev/null 2>&1 || true
+    fi
+fi

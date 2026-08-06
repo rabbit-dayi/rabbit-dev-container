@@ -1,0 +1,17 @@
+#!/bin/bash
+
+state_file="${MANAGER_CONFIG_DIR:-/root/.rabbit-dev-container}/env-manager.env"
+[ -r "$state_file" ] || return 0 2>/dev/null || exit 0
+
+while IFS='=' read -r name encoded; do
+    case "$name" in
+        MANAGER_PASSWORD|GITHUB_USER|CODE_SERVER_BIND_ADDR|CODE_SERVER_AUTH|PASSWORD|HASHED_PASSWORD|CODE_SERVER_WORKDIR|TS_ENABLE|TS_AUTHKEY|TS_AUTH_ONCE|TS_HOSTNAME|TS_ACCEPT_DNS|TS_ADVERTISE_TAGS|TS_CONFIG_TIMEOUT|TZ|LANG)
+            [ -n "$encoded" ] || { export "$name="; continue; }
+            value="$(printf '%s' "$encoded" | base64 --decode 2>/dev/null || true)"
+            case "$value" in
+                *$'\r'*|*$'\n'*) continue ;;
+                *) export "$name=$value" ;;
+            esac
+            ;;
+    esac
+done < <(sed -n '/^[A-Z_][A-Z_0-9]*=/p' "$state_file")
