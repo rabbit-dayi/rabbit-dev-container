@@ -145,7 +145,7 @@ volumes:
 
 ## Nginx HTTPS 统一入口
 
-Nginx 默认启用，是容器 Web 服务的 HTTPS 入口：容器内 code-server 默认只绑定 `127.0.0.1:8080`，HTTP `80` 会以 `308` 重定向到 HTTPS `443`。浏览器可通过 HTTPS 访问 code-server；`/status/` 提供自动刷新的运行状态页，`/dns/` 提供 DNS 测试和持久化配置页，`/manage/` 和 `/env/` 提供管理功能。
+Nginx 默认启用，是容器 Web 服务的 HTTPS 入口：容器内 code-server 默认只绑定 `127.0.0.1:8080`，HTTP `80` 会以 `308` 重定向到 HTTPS `443`。打开 `https://<域名>/` 会进入服务引导页；工作区通过 `/workspace/` 访问，`/status/` 提供自动刷新的运行状态页，`/dns/` 提供 DNS 测试和持久化配置页，`/manage/` 和 `/env/` 提供管理功能。
 
 SSH 仍独立使用 `22` 端口。正常部署只需映射 `22`、`80` 和 `443`，不要再映射 `8080`。
 
@@ -313,10 +313,10 @@ https://github.com/rabbit-dayi.keys
 浏览器打开：
 
 ```text
-https://localhost
+https://localhost/
 ```
 
-默认只需设置一个 `PASSWORD`。Nginx 会统一保护 code-server、服务跳转页、状态页和 DNS 管理页，用户名为 `admin`；浏览器在同一域名下认证一次后即可访问全部页面。code-server 此时自动使用 `auth=none`，不会再显示第二个登录页：
+默认只需设置一个 `PASSWORD`。Nginx 会统一保护工作区、服务引导页、状态页和 DNS 管理页，用户名为 `admin`；浏览器在同一域名下认证一次后即可访问全部页面。code-server 此时自动使用 `auth=none`，不会再显示第二个登录页：
 
 ```yaml
 environment:
@@ -325,11 +325,11 @@ environment:
 
 设置 `NGINX_UNIFIED_AUTH=false` 可关闭统一认证并恢复 code-server 自带登录页。显式设置 `CODE_SERVER_AUTH` 会覆盖自动选择；如果选择 `password` 但没有提供 `PASSWORD` 或 `HASHED_PASSWORD`，code-server 会保持 idle，不会反复重启刷日志。显式指定 `CODE_SERVER_AUTH=password` 时会保留 code-server 自带的第二层登录；希望一次密码访问全部页面时不要覆盖默认的自动设置。只有 `HASHED_PASSWORD` 时无法生成 Nginx Basic Auth 文件，因此仍使用 code-server 自带登录。
 
-本地使用默认自签名证书时，需要在浏览器确认一次证书警告；命令行检查可使用 `curl -k https://localhost/healthz`。部署域名和正式证书后，访问 `https://<你的域名>`。
+本地使用默认自签名证书时，需要在浏览器确认一次证书警告；命令行检查可使用 `curl -k https://localhost/healthz`。部署域名和正式证书后，访问 `https://<你的域名>`，即可先进入服务引导页。
 
 ### 环境变量管理面板
 
-浏览器打开 `https://localhost/env/` 进入环境变量管理面板；根路径 `/` 现在是统一服务入口。Nginx 负责 HTTPS 和外层 Basic Auth，用户名默认为 `admin`，密码使用 `PASSWORD`。没有设置密码时，统一 Web 入口不会开放管理页面。
+浏览器打开 `https://localhost/env/` 进入环境变量管理面板；根路径 `/` 会进入服务引导页，工作区地址为 `/workspace/`。Nginx 负责 HTTPS 和外层 Basic Auth，用户名默认为 `admin`，密码使用 `PASSWORD`。没有设置密码时，统一 Web 入口不会开放管理页面。
 
 面板只显示镜像支持的配置变量，敏感变量只显示是否已设置，不会回显密码或 Tailscale auth key。保存后配置会原子写入 `/root/.rabbit-dev-container/env-manager.env`，推荐持久化挂载 `/root`。
 

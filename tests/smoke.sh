@@ -127,6 +127,10 @@ docker run --rm -i --entrypoint /bin/bash "$image" -se <<'IMAGE_SMOKE'
         | grep "DNS:code.example.test" >/dev/null
     grep -Fq "location ^~ /echo/" /run/nginx/nginx.conf
     grep -Fq "proxy_pass http://127.0.0.1:8080/;" /run/nginx/nginx.conf
+    grep -Fq "location = / {" /run/nginx/nginx.conf
+    grep -Fq "try_files /services/index.html =404;" /run/nginx/nginx.conf
+    grep -Fq "location ^~ /workspace/" /run/nginx/nginx.conf
+    grep -Fq "href=\"/workspace/\"" /run/nginx/services/index.html
     grep -Fq "href=\"/echo/\"" /run/nginx/services/index.html
     grep -Fq "href=\"/status/\"" /run/nginx/services/index.html
     grep -Fq "location = /status/" /run/nginx/nginx.conf
@@ -304,6 +308,7 @@ portal_page="$(curl --noproxy '*' -fkS \
     "https://smoke.example.test:${https_port}/services/")"
 grep -Fq 'href="/echo/"' <<<"$portal_page"
 grep -Fq 'href="/env/"' <<<"$portal_page"
+grep -Fq 'href="/workspace/"' <<<"$portal_page"
 curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
@@ -313,6 +318,16 @@ redirect_headers="$(curl --noproxy '*' -skSI \
     "http://smoke.example.test:${http_port}/healthz" | tr -d '\r')"
 grep -qE '^HTTP/.* 308' <<<"$redirect_headers"
 grep -qi '^location: https://smoke.example.test/healthz$' <<<"$redirect_headers"
+root_page="$(curl --noproxy '*' -fkS -u admin:smoke-secret \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/")"
+grep -Fq 'Internal services' <<<"$root_page"
+grep -Fq 'href="/workspace/"' <<<"$root_page"
+workspace_page="$(curl --noproxy '*' -fkS -L \
+    -u admin:smoke-secret \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/workspace/")"
+grep -Fq 'vscode-workbench-web-configuration' <<<"$workspace_page"
 env_page="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
@@ -339,6 +354,7 @@ status_page="$(curl --noproxy '*' -fkS \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/status/")"
 grep -Fq 'id="components"' <<<"$status_page"
+grep -Fq 'href="/workspace/"' <<<"$status_page"
 status_json="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
@@ -427,6 +443,13 @@ docker exec "$container" dev status | grep -F 'components:' >/dev/null
 docker exec "$container" dev routes | grep -F 'Echo' >/dev/null
 docker exec "$container" pgrep -x sshd >/dev/null
 docker exec "$container" pgrep -f code-server >/dev/null
+for _ in {1..30}; do
+    if docker exec "$container" pgrep -af code-server 2>/dev/null \
+        | grep -F -- '--auth none' >/dev/null; then
+        break
+    fi
+    sleep 1
+done
 docker exec "$container" pgrep -af code-server | grep -F -- '--auth none' >/dev/null
 docker exec "$container" pgrep -af code-server \
     | grep -F -- '--user-data-dir /root/.rabbit-dev-container/code-server' >/dev/null

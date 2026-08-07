@@ -74,6 +74,7 @@ if [ "$unified_auth" = true ] && [ -n "${PASSWORD:-}" ]; then
 fi
 
 portal_path=/services
+workspace_path=/workspace
 status_path=/status
 status_json_path=/status.json
 dns_path=/dns
@@ -136,6 +137,7 @@ if [ -n "$service_links" ]; then
         validate_service_path "$service_path" \
             || fail "Service paths must be an absolute path without a trailing slash."
         [ "$service_path" != "$portal_path" ] \
+            && [ "$service_path" != "$workspace_path" ] \
             && [ "$service_path" != "$status_path" ] \
             && [ "$service_path" != "$status_json_path" ] \
             && [ "$service_path" != "$dns_path" ] \
@@ -304,7 +306,8 @@ cat >"$portal_file" <<'EOF'
     <h1>Internal services</h1>
     <section class="services" aria-label="Internal services">
 EOF
-printf '      <a class="service" href="/"><strong>code-server</strong><span>/</span></a>\n' >>"$portal_file"
+printf '      <a class="service" href="%s/"><strong>code-server</strong><span>%s/</span></a>\n' \
+    "$workspace_path" "$workspace_path" >>"$portal_file"
 for service_index in "${!service_names[@]}"; do
     printf '      <a class="service" href="%s/"><strong>%s</strong><span>%s/</span></a>\n' \
         "${service_paths[$service_index]}" \
@@ -585,6 +588,28 @@ write_default_proxy_location() {
     local protocol=$1
 
     cat >>"$config_file" <<EOF
+        location = / {
+            root ${runtime_dir};
+            try_files ${portal_path}/index.html =404;
+            default_type text/html;
+            add_header Cache-Control "no-store";
+        }
+
+        location ^~ ${workspace_path}/ {
+            proxy_pass http://${upstream}/;
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Host \$host;
+            proxy_set_header X-Forwarded-Proto ${protocol};
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection \$connection_upgrade;
+            proxy_buffering off;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }
+
         location = /healthz {
             auth_basic off;
             proxy_pass http://${upstream}/healthz;
