@@ -414,10 +414,23 @@ root_page="$(curl --noproxy '*' -fkS -u admin:smoke-secret \
     "https://smoke.example.test:${https_port}/")"
 grep -Fq 'Internal services' <<<"$root_page"
 grep -Fq 'href="/workspace/"' <<<"$root_page"
-workspace_page="$(curl --noproxy '*' -fkS -L \
+workspace_redirect="$(curl --noproxy '*' -skSI \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
-    "https://smoke.example.test:${https_port}/workspace/")"
+    "https://smoke.example.test:${https_port}/workspace/" | tr -d '\r')"
+grep -qE '^HTTP/.* 302' <<<"$workspace_redirect"
+grep -Fqi 'location: ./?folder=/workspace' <<<"$workspace_redirect"
+workspace_page=''
+for _ in {1..30}; do
+    workspace_page="$(curl --noproxy '*' -fkS \
+        -u admin:smoke-secret \
+        --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+        "https://smoke.example.test:${https_port}/workspace/?folder=/workspace")"
+    if grep -Fq 'vscode-workbench-web-configuration' <<<"$workspace_page"; then
+        break
+    fi
+    sleep 1
+done
 grep -Fq 'vscode-workbench-web-configuration' <<<"$workspace_page"
 env_page="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
