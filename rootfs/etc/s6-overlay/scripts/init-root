@@ -110,6 +110,8 @@ ensure_persistent_directory "$state_root" 0755
 ensure_persistent_directory "$ts_state_dir" 0700
 ensure_persistent_directory "${NPM_CONFIG_CACHE:-${state_root}/npm}" 0700
 ensure_persistent_directory "${UV_CACHE_DIR:-${state_root}/uv}" 0700
+ensure_persistent_directory "$(dirname "${RCLONE_CONFIG:-${config_root}/rclone/rclone.conf}")" 0700
+ensure_persistent_directory "${RCLONE_CACHE_DIR:-${state_root}/rclone}" 0700
 if [ -n "$runtime_authorized_source" ]; then
     install -m 600 -o root -g root "$runtime_authorized_source" "$RUNTIME_AUTHORIZED_KEYS"
 else

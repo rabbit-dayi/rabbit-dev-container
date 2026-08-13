@@ -19,7 +19,7 @@
 
 其中 Debian 的命令名分别是 `fdfind` 和 `batcat`，对应软件包为 `fd-find` 和 `bat`。
 - `Node.js`、`npm`、`npx`：JavaScript/TypeScript 运行与包管理
-- `SSHFS`：通过 SSH 挂载远程目录
+- `SSHFS`、`rclone`、`davfs2`：挂载 SSH、WebDAV 和常见对象存储
 - 常用工具：`git`、`curl`、`wget`、`vim`、`tmux`、`ping`、`iproute2`、`net-tools`、`traceroute`、`procps`，以及上面列出的完整开发工具集
 - 交互式 Bash：彩色两行提示符、Git 分支状态、`fzf` 键绑定，以及 `ll`、`la`、`gs`、`gd`、`gl`、`bat` 等快捷别名
 
@@ -63,14 +63,14 @@ docker logs rabbit-dev-container 2>&1 | grep '\[startup-check\]'
 镜像内置一个只读的统一运维入口，默认执行 `dev status`：
 
 ```bash
-dev status      # 组件、工作区和 SSHFS 状态
-dev mounts      # FUSE/SSHFS 挂载
+dev status      # 组件、工作区和 FUSE 状态
+dev mounts      # SSHFS、rclone 和其他 FUSE 挂载
 dev versions    # 主要工具版本
 ```
 
-### SSHFS 远程目录
+### SSHFS、rclone 与 WebDAV 远程目录
 
-镜像预装 `sshfs` 和 `fusermount3`。启动容器时需要把宿主机的 FUSE 设备和挂载能力传入容器：
+镜像预装 `sshfs`、`rclone`、`davfs2`、`fuse3` 和 `fusermount3`。SSHFS 与 `rclone mount` 需要把宿主机的 FUSE 设备和挂载能力传入容器：
 
 ```bash
 docker run -d \
@@ -94,7 +94,37 @@ sshfs -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3 \
 fusermount3 -u /workspace/remote
 ```
 
-如果宿主机的 seccomp 或 AppArmor 策略仍阻止 FUSE 挂载，需要按宿主机安全策略额外放行；不要把 `--privileged` 作为 SSHFS 的默认参数。
+通过 rclone 挂载 WebDAV：
+
+```bash
+rclone config
+mkdir -p /workspace/webdav
+rclone mount my-webdav: /workspace/webdav \
+  --daemon --vfs-cache-mode writes
+fusermount3 -u /workspace/webdav
+```
+
+也可以使用内核挂载命令调用 `davfs2`：
+
+```bash
+# root 用户需要非交互挂载时，将凭据写入 /etc/davfs2/secrets 并设为 0600：
+# https://dav.example.com/remote.php/dav/files/user/ user password
+mkdir -p /workspace/webdav
+mount -t davfs https://dav.example.com/remote.php/dav/files/user/ \
+  /workspace/webdav
+umount /workspace/webdav
+```
+
+`RCLONE_CONFIG` 默认是 `/root/.rabbit_container/rclone/rclone.conf`，rclone VFS 缓存默认在 `/root/.rabbit-dev-container/rclone`；持久化 `/root` 后 remote 定义和缓存都能保留。不要把 WebDAV 密码直接写进 Compose 文件或提交到仓库，优先执行 `rclone config` 并保护 `/root` 卷。`davfs2` 的 root 非交互凭据位于 `/etc/davfs2/secrets`，如需跨容器保留，应单独通过 secret 或只读文件挂载提供。
+
+Compose 用户可叠加专用的 FUSE 配置：
+
+```bash
+PASSWORD='change-this-password' docker compose \
+  -f compose.yml -f compose.fuse.yml up -d
+```
+
+如果宿主机的 seccomp 或 AppArmor 策略仍阻止 FUSE 挂载，需要按宿主机安全策略额外放行；不要把 `--privileged` 作为 SSHFS 或 rclone 的默认参数。`davfs2` 同样要求 `SYS_ADMIN`，但不依赖 `/dev/fuse`。
 
 ### DNS 管理与检测
 
@@ -191,7 +221,7 @@ ports:
 
 ### 运行状态页
 
-访问 `https://<域名>/status/` 可以查看 SSH、Nginx、code-server、rootless DIND、Tailscale 的状态，以及工作区占用和 SSHFS 挂载数量。页面每 5 秒刷新一次；对应的机器可读接口是 `/status.json`。状态服务只写入这些运行指标，不会暴露密码、auth key 或其他环境变量。
+访问 `https://<域名>/status/` 可以查看 SSH、Nginx、code-server、rootless DIND、Tailscale 的状态，以及工作区占用、全部 FUSE 和 SSHFS 挂载数量。页面每 5 秒刷新一次；对应的机器可读接口是 `/status.json`。状态服务只写入这些运行指标，不会暴露密码、auth key 或其他环境变量。
 
 ### 证书管理页
 
@@ -566,12 +596,14 @@ smoke test 会检查：
 - 标准版不包含 CUDA；CUDA 版包含 `nvcc` 和 `cuda-gdb`
 - Node.js、npm 和 npx
 - 基础维护工具的可执行文件
+- SSHFS、rclone、davfs2、FUSE 工具和持久化配置目录
 - Docker CLI、Buildx、Compose plugin 和 rootless Docker 运行时依赖
 - SSH 配置语法和有效的 keepalive/认证设置
 - 默认自签名证书、域名 HTTPS、HTTP 到 HTTPS 跳转，以及挂载自定义 TLS 证书
 - `/status/` 运行状态页和 `/dns/` DNS 管理页的测试、持久化和环境变量覆盖行为
 - 状态采样服务、`dev` 运维命令和服务健康检查
 - 启动自检日志、配置目录与四个持久化挂载点
+- runner 提供 `/dev/fuse` 时，通过本地 SFTP 和 WebDAV 服务实际检查 SSHFS、rclone FUSE 与 davfs2 的挂载、读写和卸载
 - `/init`、sshd、code-server 和 nginx 的实际运行状态
 - `/root/.ssh/authorized_keys`（含只读挂载回退）的真实 SSH 公钥登录、host key 持久化和登录 MOTD
 - Tailscale 默认关闭，以及启用但缺少 TUN 时不会影响主服务
@@ -645,6 +677,19 @@ docker exec rabbit-dev-container ls -l /run/user/1000/docker.sock /dev/fuse
 ```
 
 若日志提示 user namespace 不可用，需要由宿主机管理员启用非特权 user namespace；若提示 `/dev/fuse` 不可用，通常表示外层容器没有使用 `--privileged`。不要通过挂载宿主机 Docker socket 来替代这些条件，那会让容器直接控制宿主机 daemon。
+
+### SSHFS 或 rclone 挂载失败
+
+先检查设备、能力和启动自检：
+
+```bash
+docker exec rabbit-dev-container ls -l /dev/fuse
+docker exec rabbit-dev-container dev versions
+docker exec rabbit-dev-container dev mounts
+docker logs rabbit-dev-container 2>&1 | grep '\[startup-check\]'
+```
+
+确保容器带有 `/dev/fuse` 与 `SYS_ADMIN`；Compose 可叠加 `compose.fuse.yml`。`fusermount3: permission denied` 通常表示宿主机的 seccomp、AppArmor 或容器设备策略仍在拦截。WebDAV 连通但 rclone 无法写入时，还要检查 remote 是否只读以及 `--vfs-cache-mode writes` 是否启用。
 
 ### DNS 或 GitHub 暂时不可用
 

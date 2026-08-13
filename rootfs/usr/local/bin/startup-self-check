@@ -62,13 +62,24 @@ until primary_ready; do
 done
 
 missing_tools=()
-for tool in bash git curl aria2c btop docker code-server nginx sshd uv; do
+for tool in bash git curl aria2c btop docker code-server nginx sshd uv \
+    sshfs fusermount3 rclone mount.davfs; do
     command -v "$tool" >/dev/null 2>&1 || missing_tools+=("$tool")
 done
 if ((${#missing_tools[@]} == 0)); then
-    ok 'toolchain: bash git curl aria2c btop docker code-server nginx sshd uv'
+    ok 'toolchain includes SSHFS, rclone, WebDAV, Docker, code-server and CUDA-ready utilities'
 else
     warn "toolchain missing: ${missing_tools[*]}"
+fi
+
+if [ -c /dev/fuse ]; then
+    if [ -r /dev/fuse ] && [ -w /dev/fuse ]; then
+        ok 'FUSE device is available for SSHFS and rclone mounts'
+    else
+        warn '/dev/fuse exists but is not readable and writable'
+    fi
+else
+    skip 'FUSE device is not attached; add --device /dev/fuse and SYS_ADMIN for mounts'
 fi
 
 if tcp_ready; then
@@ -160,6 +171,11 @@ if [ -d "$state_root" ] && [ -r "$state_root" ] && [ -w "$state_root" ]; then
     ok "state directory is accessible: ${state_root}"
 else
     warn "state directory is not readable and writable: ${state_root}"
+fi
+if [ -d "$(dirname "${RCLONE_CONFIG:-${config_root}/rclone/rclone.conf}")" ]; then
+    ok "rclone configuration directory is ready: $(dirname "${RCLONE_CONFIG:-${config_root}/rclone/rclone.conf}")"
+else
+    warn 'rclone configuration directory is missing'
 fi
 if [ -d "$data_root" ] && [ -r "$data_root" ] && [ -w "$data_root" ]; then
     ok "data directory is accessible: ${data_root}"

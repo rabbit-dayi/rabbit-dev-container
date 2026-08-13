@@ -27,6 +27,9 @@ git -C "$repo_root" grep -q -- 'tests/smoke\.sh' -- README.md
 git -C "$repo_root" grep -q -- 'ARG DEBIAN_MIRROR=mirrors\.ustc\.edu\.cn' -- Dockerfile
 git -C "$repo_root" grep -q -- 'CONTAINER_CONFIG_DIR=/root/\.rabbit_container' -- Dockerfile
 git -C "$repo_root" grep -q -- 'STARTUP_SELF_CHECK=true' -- Dockerfile
+git -C "$repo_root" grep -q -- 'RCLONE_CONFIG=/root/\.rabbit_container/rclone/rclone\.conf' -- Dockerfile
+git -C "$repo_root" grep -q -- 'rclone davfs2' -- Dockerfile
 grep -q -- 'rabbit-dev-container-opt:/opt' "$repo_root/compose.yml"
 grep -q -- 'rabbit-dev-container-home:/home' "$repo_root/compose.yml"
+grep -q -- '/dev/fuse:/dev/fuse' "$repo_root/compose.fuse.yml"
 printf 'Repository tests passed.\n'

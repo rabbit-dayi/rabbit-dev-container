@@ -28,6 +28,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_COMPILE_BYTECODE=1 \
     UV_CACHE_DIR=/root/.rabbit-dev-container/uv \
     NPM_CONFIG_CACHE=/root/.rabbit-dev-container/npm \
+    RCLONE_CONFIG=/root/.rabbit_container/rclone/rclone.conf \
+    RCLONE_CACHE_DIR=/root/.rabbit-dev-container/rclone \
     S6_KEEP_ENV=1 \
     S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
     CODE_SERVER_BIND_ADDR=127.0.0.1:8080 \
@@ -103,7 +105,8 @@ RUN set -eux; \
       libssl-dev libffi-dev libsqlite3-dev zlib1g-dev libbz2-dev libreadline-dev \
       liblzma-dev screen zsh fish fzf entr parallel direnv sqlite3 uuid-runtime \
       lftp iperf3 ethtool iputils-tracepath bridge-utils libarchive-tools zstd \
-      pigz rename python3-yaml python3-requests nodejs npm fuse-overlayfs sshfs \
+      pigz rename python3-yaml python3-requests nodejs npm fuse3 fuse-overlayfs sshfs \
+      rclone davfs2 \
       slirp4netns uidmap nginx-light openssl; \
     install -m 0755 -d /etc/apt/keyrings; \
     curl -fsSL --retry 3 --retry-all-errors \

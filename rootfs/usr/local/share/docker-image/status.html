@@ -118,7 +118,7 @@
       document.getElementById('load').textContent = (data.load_average || []).join(' / ') || '--';
       document.getElementById('uptime').textContent = formatUptime(data.uptime_seconds);
       document.getElementById('hostname').textContent = data.hostname || '--';
-      document.getElementById('mounts').textContent = `SSHFS ${Number(data.sshfs_mounts) || 0}`;
+      document.getElementById('mounts').textContent = `FUSE ${Number(data.fuse_mounts) || 0} · SSHFS ${Number(data.sshfs_mounts) || 0}`;
 
       const components = Object.entries(data.components || {});
       const online = components.filter(([, value]) => value === 'up').length;

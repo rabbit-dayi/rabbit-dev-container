@@ -400,8 +400,9 @@ cat >"$status_page" <<'EOF'
         <article class="component"><strong>${escapeHtml(componentLabels[key] || key)}</strong><span class="badge ${stateClass(state)}">${escapeHtml(stateLabel(state))}</span></article>
       `).join('');
       const usage = data.workspace_usage || 'unknown';
-      const mounts = Number.isFinite(Number(data.sshfs_mounts)) ? data.sshfs_mounts : 0;
-      document.getElementById('summary').textContent = `Workspace usage ${usage} · SSHFS mounts ${mounts}`;
+      const mounts = Number.isFinite(Number(data.fuse_mounts)) ? data.fuse_mounts : 0;
+      const sshfsMounts = Number.isFinite(Number(data.sshfs_mounts)) ? data.sshfs_mounts : 0;
+      document.getElementById('summary').textContent = `Workspace usage ${usage} · FUSE mounts ${mounts} · SSHFS ${sshfsMounts}`;
       document.getElementById('updated').textContent = data.generated_at ? `updated ${new Date(data.generated_at).toLocaleTimeString()}` : 'starting';
       const services = data.services || [];
       document.getElementById('services').innerHTML = services.length ? services.map((service) => `
@@ -428,7 +429,7 @@ EOF
 install -m 0644 /usr/local/share/docker-image/status.html "$status_page"
 if [ ! -s "$status_file" ] || ! jq -e . "$status_file" >/dev/null 2>&1; then
     cat >"$status_file" <<'EOF'
-{"generated_at":null,"hostname":"unknown","uptime_seconds":0,"workspace_usage":"unknown","memory_used_bytes":0,"memory_total_bytes":0,"memory_usage_percent":0,"load_average":["0","0","0"],"sshfs_mounts":0,"components":{},"services":[]}
+{"generated_at":null,"hostname":"unknown","uptime_seconds":0,"workspace_usage":"unknown","memory_used_bytes":0,"memory_total_bytes":0,"memory_usage_percent":0,"load_average":["0","0","0"],"fuse_mounts":0,"sshfs_mounts":0,"components":{},"services":[]}
 EOF
 fi
 chmod 0644 "$status_page" "$status_file"

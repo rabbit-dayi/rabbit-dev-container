@@ -17,12 +17,14 @@ container="rabbit-dev-container-smoke-${RANDOM}"
 tls_container="${container}-tls"
 hostkey_container="${container}-hostkeys"
 persistence_container="${container}-persistence"
+mount_container="${container}-mounts"
 tmpdir="$(mktemp -d)"
 cleanup() {
     docker rm -f "$container" >/dev/null 2>&1 || true
     docker rm -f "$tls_container" >/dev/null 2>&1 || true
     docker rm -f "$hostkey_container" >/dev/null 2>&1 || true
     docker rm -f "$persistence_container" >/dev/null 2>&1 || true
+    docker rm -f "$mount_container" >/dev/null 2>&1 || true
     if command -v sudo >/dev/null 2>&1; then
         sudo rm -rf -- "$tmpdir"
     else
@@ -50,7 +52,7 @@ docker run --rm -i --entrypoint /bin/bash -e EXPECT_CUDA="$expect_cuda" "$image"
         docker dockerd dockerd-rootless.sh newuidmap newgidmap \
         slirp4netns fuse-overlayfs ldd \
         htop jq lsof ncdu tree dig mtr tcpdump rsync socat pstree strace aria2c \
-        sshfs fusermount3 node npm npx \
+        sshfs fusermount3 rclone mount.davfs node npm npx \
         bwrap btop iotop iftop sar nethogs killall \
         pip3 rg fdfind batcat cmake ninja meson gcc gdb ltrace valgrind shellcheck \
         git-lfs gawk gettext man screen zsh fish fzf entr parallel direnv sqlite3 \
@@ -109,6 +111,8 @@ docker run --rm -i --entrypoint /bin/bash -e EXPECT_CUDA="$expect_cuda" "$image"
     test "${DOCKERD_CACHE_DIR}" = /opt/.rabbit_container/dockerd/cache
     test "${NPM_CONFIG_CACHE}" = /root/.rabbit-dev-container/npm
     test "${UV_CACHE_DIR}" = /root/.rabbit-dev-container/uv
+    test "${RCLONE_CONFIG}" = /root/.rabbit_container/rclone/rclone.conf
+    test "${RCLONE_CACHE_DIR}" = /root/.rabbit-dev-container/rclone
     test "${MANAGER_CONFIG_DIR}" = /root/.rabbit_container
     grep -Fq -- "--user-data-dir \"\$user_data_dir\"" /etc/s6-overlay/s6-rc.d/code-server/run
     grep -Fq '/root/.rabbit_container/resolver.json' /usr/local/bin/configure-resolv
@@ -199,7 +203,10 @@ docker run --rm -i --entrypoint /bin/bash -e EXPECT_CUDA="$expect_cuda" "$image"
         /usr/local/bin/update-status
     jq -e ".services | length == 2" \
         /run/nginx/status/status.json >/dev/null
+    jq -e '.fuse_mounts == 0 and .sshfs_mounts == 0' \
+        /run/nginx/status/status.json >/dev/null
     /usr/local/bin/dev routes | grep -F 'Echo' >/dev/null
+    /usr/local/bin/dev versions | grep -F 'rclone:' >/dev/null
 
     tunnel_test_dir="$(mktemp -d)"
     printf "%s\n" \
@@ -327,6 +334,8 @@ for persistent_path in root workspace opt home; do
     grep -Fxq "preserve-$persistent_path" "$tmpdir/persistent/$persistent_path/marker"
 done
 docker exec "$persistence_container" test -s /root/.ssh/ssh_host_ed25519_key
+docker exec "$persistence_container" test -d /root/.rabbit_container/rclone
+docker exec "$persistence_container" test -d /root/.rabbit-dev-container/rclone
 docker rm -f "$persistence_container" >/dev/null
 
 ssh-keygen -q -t ed25519 -N '' -f "$tmpdir/id_ed25519"
@@ -681,6 +690,121 @@ if [ -c /dev/net/tun ]; then
     docker exec "$container" pgrep -x tailscaled >/dev/null
     docker exec "$container" pgrep -x sshd >/dev/null
     docker exec "$container" pgrep -f code-server >/dev/null
+fi
+
+# Exercise real SSHFS and rclone/WebDAV FUSE mounts when the Docker host makes
+# /dev/fuse available. GitHub-hosted runners commonly omit it, while local and
+# self-hosted runners can cover the full mount lifecycle.
+fuse_capable=1
+if ! docker run --rm --privileged --entrypoint /bin/bash "$image" -c 'test -c /dev/fuse && test -r /dev/fuse && test -w /dev/fuse'; then
+    fuse_capable=0
+    echo "Skipping FUSE mount integration: runner does not expose /dev/fuse." >&2
+fi
+
+if [ "$fuse_capable" -eq 1 ]; then
+    docker run --rm --name "$mount_container" --privileged -i \
+        --entrypoint /bin/bash "$image" -se <<'FUSE_MOUNT_SMOKE'
+set -Eeuo pipefail
+
+workdir="$(mktemp -d)"
+cleanup_mounts() {
+    fusermount3 -u "$workdir/sshfs-mount" >/dev/null 2>&1 || true
+    fusermount3 -u "$workdir/rclone-mount" >/dev/null 2>&1 || true
+    if mountpoint -q "$workdir/davfs-mount"; then
+        umount "$workdir/davfs-mount" >/dev/null 2>&1 || true
+    fi
+    [ -n "${webdav_pid:-}" ] && kill "$webdav_pid" >/dev/null 2>&1 || true
+    [ -n "${sshd_pid:-}" ] && kill "$sshd_pid" >/dev/null 2>&1 || true
+    rm -rf "$workdir"
+}
+trap cleanup_mounts EXIT
+
+mkdir -p "$workdir"/{ssh-source,sshfs-mount,webdav-source,rclone-mount,davfs-mount,cache,sshd}
+printf '%s\n' 'sshfs-read-ok' >"$workdir/ssh-source/remote.txt"
+ssh-keygen -q -t ed25519 -N '' -f "$workdir/client-key"
+ssh-keygen -q -t ed25519 -N '' -f "$workdir/host-key"
+cp "$workdir/client-key.pub" "$workdir/authorized_keys"
+chmod 600 "$workdir/client-key" "$workdir/authorized_keys"
+cat >"$workdir/sshd_config" <<EOF
+Port 2222
+ListenAddress 127.0.0.1
+PidFile $workdir/sshd.pid
+HostKey $workdir/host-key
+AuthorizedKeysFile $workdir/authorized_keys
+StrictModes no
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+UsePAM no
+Subsystem sftp internal-sftp
+EOF
+/usr/sbin/sshd -D -e -f "$workdir/sshd_config" >"$workdir/sshd.log" 2>&1 &
+sshd_pid=$!
+for _ in {1..50}; do
+    ssh -i "$workdir/client-key" -p 2222 -o BatchMode=yes \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        root@127.0.0.1 true >/dev/null 2>&1 && break
+    sleep 0.1
+done
+sshfs -p 2222 \
+    -o IdentityFile="$workdir/client-key" \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    "root@127.0.0.1:$workdir/ssh-source" "$workdir/sshfs-mount"
+grep -Fxq 'sshfs-read-ok' "$workdir/sshfs-mount/remote.txt"
+printf '%s\n' 'sshfs-write-ok' >"$workdir/sshfs-mount/write.txt"
+grep -Fxq 'sshfs-write-ok' "$workdir/ssh-source/write.txt"
+awk -v path="$workdir/sshfs-mount" '$2 == path && $3 == "fuse.sshfs" {found=1} END {exit !found}' /proc/mounts
+fusermount3 -u "$workdir/sshfs-mount"
+
+printf '%s\n' 'webdav-read-ok' >"$workdir/webdav-source/remote.txt"
+rclone serve webdav "$workdir/webdav-source" --addr 127.0.0.1:18443 \
+    --log-file "$workdir/webdav.log" --log-level INFO &
+webdav_pid=$!
+for _ in {1..50}; do
+    curl -fsS http://127.0.0.1:18443/ >/dev/null 2>&1 && break
+    sleep 0.1
+done
+cat >"$workdir/rclone.conf" <<EOF
+[webdav-smoke]
+type = webdav
+url = http://127.0.0.1:18443/
+vendor = other
+EOF
+rclone --config "$workdir/rclone.conf" --cache-dir "$workdir/cache" \
+    mount webdav-smoke: "$workdir/rclone-mount" --daemon --vfs-cache-mode writes
+for _ in {1..50}; do
+    [ -r "$workdir/rclone-mount/remote.txt" ] && break
+    sleep 0.1
+done
+grep -Fxq 'webdav-read-ok' "$workdir/rclone-mount/remote.txt"
+printf '%s\n' 'webdav-write-ok' >"$workdir/rclone-mount/write.txt"
+for _ in {1..50}; do
+    grep -Fxq 'webdav-write-ok' "$workdir/webdav-source/write.txt" 2>/dev/null && break
+    sleep 0.1
+done
+grep -Fxq 'webdav-write-ok' "$workdir/webdav-source/write.txt"
+awk -v path="$workdir/rclone-mount" '$2 == path && $3 == "fuse.rclone" {found=1} END {exit !found}' /proc/mounts
+fusermount3 -u "$workdir/rclone-mount"
+
+kill "$webdav_pid"
+wait "$webdav_pid" 2>/dev/null || true
+rclone serve webdav "$workdir/webdav-source" --addr 127.0.0.1:18443 \
+    --user rabbit --pass mount-secret \
+    --log-file "$workdir/davfs-webdav.log" --log-level INFO &
+webdav_pid=$!
+for _ in {1..50}; do
+    curl -fsS -u rabbit:mount-secret http://127.0.0.1:18443/ >/dev/null 2>&1 && break
+    sleep 0.1
+done
+printf '%s %s %s\n' \
+    'http://127.0.0.1:18443/' rabbit mount-secret >>/etc/davfs2/secrets
+chmod 600 /etc/davfs2/secrets
+mount -t davfs http://127.0.0.1:18443/ "$workdir/davfs-mount" -o rw
+grep -Fxq 'webdav-read-ok' "$workdir/davfs-mount/remote.txt"
+printf '%s\n' 'davfs-write-ok' >"$workdir/davfs-mount/davfs-write.txt"
+grep -Fxq 'davfs-write-ok' "$workdir/davfs-mount/davfs-write.txt"
+umount "$workdir/davfs-mount"
+grep -Fxq 'davfs-write-ok' "$workdir/webdav-source/davfs-write.txt"
+FUSE_MOUNT_SMOKE
 fi
 
 # Rootless Docker needs the outer container's relaxed security profile and a
