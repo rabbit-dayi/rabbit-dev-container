@@ -23,7 +23,11 @@ cleanup() {
     docker rm -f "$tls_container" >/dev/null 2>&1 || true
     docker rm -f "$hostkey_container" >/dev/null 2>&1 || true
     docker rm -f "$persistence_container" >/dev/null 2>&1 || true
-    rm -rf "$tmpdir"
+    if command -v sudo >/dev/null 2>&1; then
+        sudo rm -rf -- "$tmpdir"
+    else
+        rm -rf -- "$tmpdir"
+    fi
 }
 trap cleanup EXIT
 
