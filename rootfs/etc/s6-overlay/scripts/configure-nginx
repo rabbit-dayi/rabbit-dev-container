@@ -194,7 +194,7 @@ default_cert="${default_cert_dir}/tls.crt"
 default_key="${default_cert_dir}/tls.key"
 mounted_cert=/etc/nginx/certs/tls.crt
 mounted_key=/etc/nginx/certs/tls.key
-manager_config_dir="${MANAGER_CONFIG_DIR:-/root/.rabbit-dev-container}"
+manager_config_dir="${MANAGER_CONFIG_DIR:-/root/.rabbit_container}"
 uploaded_cert="${manager_config_dir}/tls/current/tls.crt"
 uploaded_key="${manager_config_dir}/tls/current/tls.key"
 

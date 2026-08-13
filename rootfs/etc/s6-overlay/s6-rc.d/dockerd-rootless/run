@@ -7,17 +7,21 @@ if [ "${DOCKERD_ROOTLESS_ENABLE:-false}" != "true" ]; then
 fi
 
 docker_user=dockerd
-docker_home=/home/dockerd
 docker_uid="$(id -u "$docker_user")"
 runtime_dir="/run/user/${docker_uid}"
-state_root="${CONTAINER_STATE_DIR:-/root/.rabbit-dev-container}"
-data_dir="${DOCKERD_DATA_ROOT:-${state_root}/docker}"
-config_dir="${DOCKERD_CONFIG_DIR:-${state_root}/dockerd/config}"
-cache_dir="${DOCKERD_CACHE_DIR:-${state_root}/dockerd/cache}"
+docker_home="${runtime_dir}/home"
+data_root="${CONTAINER_DATA_DIR:-/opt/.rabbit_container}"
+data_dir="${DOCKERD_DATA_ROOT:-${data_root}/docker}"
+config_dir="${DOCKERD_CONFIG_DIR:-${data_root}/dockerd/config}"
+cache_dir="${DOCKERD_CACHE_DIR:-${data_root}/dockerd/cache}"
+xdg_data_dir="${XDG_DATA_HOME:-${data_root}/dockerd/data}"
 
 if ! /command/s6-setuidgid "$docker_user" /usr/bin/test -w "$docker_home" \
     || ! /command/s6-setuidgid "$docker_user" /usr/bin/test -w "$runtime_dir" \
-    || ! /command/s6-setuidgid "$docker_user" /usr/bin/test -w "$data_dir"; then
+    || ! /command/s6-setuidgid "$docker_user" /usr/bin/test -w "$data_dir" \
+    || ! /command/s6-setuidgid "$docker_user" /usr/bin/test -w "$config_dir" \
+    || ! /command/s6-setuidgid "$docker_user" /usr/bin/test -w "$cache_dir" \
+    || ! /command/s6-setuidgid "$docker_user" /usr/bin/test -w "$xdg_data_dir"; then
     echo "[dockerd-rootless] Rootless runtime directories are not writable; service will stay idle." >&2
     exec sleep infinity
 fi
@@ -37,7 +41,7 @@ exec /command/s6-setuidgid "$docker_user" /usr/bin/env \
     XDG_RUNTIME_DIR="$runtime_dir" \
     XDG_CONFIG_HOME="$config_dir" \
     XDG_CACHE_HOME="$cache_dir" \
-    XDG_DATA_HOME="${XDG_DATA_HOME:-${state_root}/dockerd}" \
+    XDG_DATA_HOME="$xdg_data_dir" \
     DOCKER_HOST= \
     dockerd-rootless.sh \
     --host="unix://${runtime_dir}/docker.sock" \

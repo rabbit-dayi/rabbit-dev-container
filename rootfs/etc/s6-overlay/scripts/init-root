@@ -7,92 +7,123 @@ fi
 
 GREEN='\033[0;32m'
 NC='\033[0m'
-BACKUP_FILE="/usr/share/root_backup.tar.gz"
 AUTHORIZED_KEYS=/root/.ssh/authorized_keys
 RUNTIME_AUTHORIZED_KEYS=/run/sshd/authorized_keys
+RUNTIME_GITHUB_KEYS=/run/sshd/github-authorized_keys
+HOST_KEY_DIR=/root/.ssh
 
 echo -e "${GREEN}[init-root] Starting initialization...${NC}"
 
-if [ ! -f "/root/.bashrc" ]; then
-    echo -e "${GREEN}[init-root] /root appears empty or mounted. Restoring from backup...${NC}"
-    tar -xzf "$BACKUP_FILE" -C / --keep-newer-files 2>/dev/null || true
-    echo -e "${GREEN}[init-root] Restore complete.${NC}"
-else
-    echo -e "${GREEN}[init-root] /root contains data. Skipping restore.${NC}"
+if [ ! -e "$HOST_KEY_DIR" ]; then
+    install -d -m 0700 "$HOST_KEY_DIR"
+elif [ ! -d "$HOST_KEY_DIR" ]; then
+    echo "[init-root] ${HOST_KEY_DIR} exists but is not a directory; SSH cannot initialize." >&2
+    exit 1
 fi
 
 /usr/local/bin/configure-resolv
 
-mkdir -p /root/.ssh
-had_authorized_keys=0
-if [ -s "$AUTHORIZED_KEYS" ]; then
-    had_authorized_keys=1
-fi
-
-if [ -n "${GITHUB_USER:-}" ]; then
+runtime_authorized_source=""
+if [ -r "$AUTHORIZED_KEYS" ]; then
+    runtime_authorized_source="$AUTHORIZED_KEYS"
+elif [ -n "${GITHUB_USER:-}" ]; then
     if [[ ! "$GITHUB_USER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]; then
         echo "[init-root] Invalid GitHub username: ${GITHUB_USER}" >&2
         exit 1
     fi
 
-    echo -e "${GREEN}[init-root] Downloading GitHub SSH keys for ${GITHUB_USER}...${NC}"
-    tmp_keys="$(mktemp /root/.ssh/authorized_keys.XXXXXX)"
-    if curl -fsSL --connect-timeout 10 --max-time 30 "https://github.com/${GITHUB_USER}.keys" -o "$tmp_keys" && [ -s "$tmp_keys" ]; then
-        chmod 600 "$tmp_keys"
-        if mv -f "$tmp_keys" "$AUTHORIZED_KEYS" 2>/dev/null; then
-            echo -e "${GREEN}[init-root] GitHub SSH keys installed.${NC}"
-        else
-            rm -f "$tmp_keys"
-            echo "[init-root] authorized_keys cannot be replaced; keeping the mounted or existing file." >&2
-        fi
+    echo -e "${GREEN}[init-root] Downloading runtime GitHub SSH keys for ${GITHUB_USER}...${NC}"
+    if curl -fsSL --connect-timeout 10 --max-time 30 \
+        "https://github.com/${GITHUB_USER}.keys" -o "$RUNTIME_GITHUB_KEYS" \
+        && [ -s "$RUNTIME_GITHUB_KEYS" ]; then
+        chmod 600 "$RUNTIME_GITHUB_KEYS"
+        runtime_authorized_source="$RUNTIME_GITHUB_KEYS"
+        echo -e "${GREEN}[init-root] Runtime GitHub SSH keys loaded.${NC}"
     else
-        rm -f "$tmp_keys"
-        if [ "$had_authorized_keys" -eq 1 ]; then
-            echo "[init-root] Failed to download non-empty GitHub SSH keys for ${GITHUB_USER}; keeping existing authorized_keys." >&2
-        else
-            echo "[init-root] Failed to download non-empty GitHub SSH keys for ${GITHUB_USER}; continuing without authorized_keys." >&2
-        fi
+        rm -f "$RUNTIME_GITHUB_KEYS"
+        echo "[init-root] Failed to download non-empty GitHub SSH keys for ${GITHUB_USER}; continuing without authorized_keys." >&2
     fi
 else
-    echo -e "${GREEN}[init-root] GITHUB_USER is empty. Keeping existing authorized_keys.${NC}"
+    echo -e "${GREEN}[init-root] No authorized_keys found; GitHub key bootstrap is disabled.${NC}"
 fi
 
-if [ ! -e "$AUTHORIZED_KEYS" ] && ! touch "$AUTHORIZED_KEYS" 2>/dev/null; then
-    echo "[init-root] Could not create authorized_keys; continuing for mounted configurations." >&2
-fi
+ensure_host_key() {
+    local type=$1
+    local key_path="${HOST_KEY_DIR}/ssh_host_${type}_key"
 
-chmod 700 /root/.ssh 2>/dev/null || true
-chown root:root /root/.ssh 2>/dev/null || true
-if [ -e "$AUTHORIZED_KEYS" ]; then
-    chmod 600 "$AUTHORIZED_KEYS" 2>/dev/null || true
-    chown root:root "$AUTHORIZED_KEYS" 2>/dev/null || true
-fi
+    if [ ! -e "$key_path" ]; then
+        case "$type" in
+            rsa) ssh-keygen -q -t rsa -b 4096 -N '' -f "$key_path" ;;
+            ecdsa) ssh-keygen -q -t ecdsa -b 521 -N '' -f "$key_path" ;;
+            ed25519) ssh-keygen -q -t ed25519 -N '' -f "$key_path" ;;
+            *) echo "[init-root] Unsupported SSH host key type: $type" >&2; return 1 ;;
+        esac
+        echo -e "${GREEN}[init-root] Generated persistent ${type} SSH host key.${NC}"
+    fi
 
-ssh-keygen -A
+}
+
+ensure_host_key rsa
+ensure_host_key ecdsa
+ensure_host_key ed25519
+
+ensure_persistent_directory() {
+    local path=$1
+    local mode=$2
+
+    if [ -e "$path" ]; then
+        if [ ! -d "$path" ]; then
+            echo "[init-root] ${path} exists but is not a directory." >&2
+            exit 1
+        fi
+        return
+    fi
+
+    install -d -m "$mode" "$path"
+}
+
+ensure_dockerd_directory() {
+    local path=$1
+
+    if [ -e "$path" ]; then
+        if [ ! -d "$path" ]; then
+            echo "[init-root] ${path} exists but is not a directory." >&2
+            exit 1
+        fi
+        return
+    fi
+
+    install -d -m 0700 -o dockerd -g dockerd "$path"
+}
+
+config_root="${CONTAINER_CONFIG_DIR:-/root/.rabbit_container}"
+data_root="${CONTAINER_DATA_DIR:-/opt/.rabbit_container}"
 state_root="${CONTAINER_STATE_DIR:-/root/.rabbit-dev-container}"
 ts_state_dir="${TS_STATE_DIR:-${state_root}/tailscale}"
-docker_data_root="${DOCKERD_DATA_ROOT:-${state_root}/docker}"
-docker_config_dir="${DOCKERD_CONFIG_DIR:-${state_root}/dockerd/config}"
-docker_cache_dir="${DOCKERD_CACHE_DIR:-${state_root}/dockerd/cache}"
-mkdir -p /run/sshd /run/tailscale /run/user /run/env-manager /workspace \
-    "$state_root" "$ts_state_dir" "$docker_data_root" \
-    "$docker_config_dir" "$docker_cache_dir" \
-    "${NPM_CONFIG_CACHE:-${state_root}/npm}" \
-    "${UV_CACHE_DIR:-${state_root}/uv}"
-if [ -r "$AUTHORIZED_KEYS" ]; then
-    install -m 600 -o root -g root "$AUTHORIZED_KEYS" "$RUNTIME_AUTHORIZED_KEYS"
+docker_data_root="${DOCKERD_DATA_ROOT:-${data_root}/docker}"
+docker_config_dir="${DOCKERD_CONFIG_DIR:-${data_root}/dockerd/config}"
+docker_cache_dir="${DOCKERD_CACHE_DIR:-${data_root}/dockerd/cache}"
+mkdir -p /run/sshd /run/tailscale /run/user /run/env-manager
+ensure_persistent_directory "$config_root" 0700
+ensure_persistent_directory "$data_root" 0755
+ensure_persistent_directory "$state_root" 0755
+ensure_persistent_directory "$ts_state_dir" 0700
+ensure_persistent_directory "${NPM_CONFIG_CACHE:-${state_root}/npm}" 0700
+ensure_persistent_directory "${UV_CACHE_DIR:-${state_root}/uv}" 0700
+if [ -n "$runtime_authorized_source" ]; then
+    install -m 600 -o root -g root "$runtime_authorized_source" "$RUNTIME_AUTHORIZED_KEYS"
 else
     install -m 600 -o root -g root /dev/null "$RUNTIME_AUTHORIZED_KEYS"
 fi
-chmod 700 "$ts_state_dir" 2>/dev/null || true
-
 if id dockerd >/dev/null 2>&1; then
     docker_uid="$(id -u dockerd)"
-    install -d -m 0700 -o dockerd -g dockerd \
-        "/run/user/${docker_uid}" \
-        "$docker_data_root" \
-        "$docker_config_dir" "$docker_cache_dir" \
-        "${XDG_DATA_HOME:-${state_root}/dockerd}"
+    ensure_dockerd_directory "/run/user/${docker_uid}"
+    ensure_dockerd_directory "/run/user/${docker_uid}/home"
+    ensure_dockerd_directory "$docker_data_root"
+    ensure_dockerd_directory "${data_root}/dockerd"
+    ensure_dockerd_directory "${XDG_DATA_HOME:-${data_root}/dockerd/data}"
+    ensure_dockerd_directory "$docker_config_dir"
+    ensure_dockerd_directory "$docker_cache_dir"
 fi
 
 echo -e "${GREEN}[init-root] Initialization done.${NC}"

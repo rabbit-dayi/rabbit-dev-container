@@ -1,3 +1,5 @@
+# check=skip=SecretsUsedInArgOrEnv
+
 FROM golang:1.26.5-bookworm AS manager-builder
 
 WORKDIR /src
@@ -10,9 +12,9 @@ RUN go test ./... && \
     CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
       -o /out/docker-image-env-manager ./cmd/env-manager
 
-FROM debian:13-slim
+FROM debian:13-slim AS base
 
-ARG DEBIAN_MIRROR=deb.debian.org
+ARG DEBIAN_MIRROR=mirrors.ustc.edu.cn
 ARG S6_OVERLAY_VERSION=v3.2.3.0
 ARG CODE_SERVER_VERSION=4.127.0
 ARG TAILSCALE_VERSION=1.98.8
@@ -39,6 +41,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NGINX_SERVER_NAMES=_ \
     NGINX_UPSTREAM=127.0.0.1:8080 \
     NGINX_SERVICE_LINKS=Environment|/env|127.0.0.1:8789 \
+    CONTAINER_CONFIG_DIR=/root/.rabbit_container \
+    CONTAINER_DATA_DIR=/opt/.rabbit_container \
     CONTAINER_STATE_DIR=/root/.rabbit-dev-container \
     TS_ENABLE=false \
     TS_STATE_DIR=/root/.rabbit-dev-container/tailscale \
@@ -47,21 +51,23 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TS_CONFIG_TIMEOUT=30 \
     DOCKERD_ROOTLESS_ENABLE=false \
     DOCKER_HOST=unix:///run/user/1000/docker.sock \
-    DOCKERD_CONFIG_DIR=/root/.rabbit-dev-container/dockerd/config \
-    DOCKERD_CACHE_DIR=/root/.rabbit-dev-container/dockerd/cache \
+    DOCKERD_CONFIG_DIR=/opt/.rabbit_container/dockerd/config \
+    DOCKERD_CACHE_DIR=/opt/.rabbit_container/dockerd/cache \
     STARTUP_BANNER=true \
+    STARTUP_SELF_CHECK=true \
+    STARTUP_CHECK_TIMEOUT=20 \
     RESOLV_WEB_ENABLE=true \
     RESOLV_WEB_ALLOW_UNAUTHENTICATED=false \
     RESOLV_WEB_PORT=8787 \
     MANAGER_ENABLE=true \
     MANAGER_PORT=8788 \
-    MANAGER_CONFIG_DIR=/root/.rabbit-dev-container \
-    RESOLV_STATE_FILE=/root/.rabbit-dev-container/resolver.json \
-    DOCKERD_DATA_ROOT=/root/.rabbit-dev-container/docker \
+    MANAGER_CONFIG_DIR=/root/.rabbit_container \
+    RESOLV_STATE_FILE=/root/.rabbit_container/resolver.json \
+    DOCKERD_DATA_ROOT=/opt/.rabbit_container/docker \
     STATUS_INTERVAL=5 \
     ENV_MANAGER_ENABLE=true \
     ENV_MANAGER_BIND_ADDR=127.0.0.1:8789 \
-    ENV_MANAGER_CONFIG_DIR=/root/.rabbit-dev-container \
+    ENV_MANAGER_CONFIG_DIR=/root/.rabbit_container \
     ENV_MANAGER_USERNAME=admin \
     ENV_MANAGER_TLS_ENABLE=false \
     ENV_MANAGER_ALLOW_UNAUTHENTICATED=false
@@ -72,16 +78,22 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.28 /uv /usr/local/bin/uv
 
 RUN set -eux; \
     if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-      sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
-      sed -i "s|security.debian.org|${DEBIAN_MIRROR}/debian-security|g" /etc/apt/sources.list.d/debian.sources; \
+      sed -i \
+        -e "s|security.debian.org/debian-security|${DEBIAN_MIRROR}/debian-security|g" \
+        -e "s|deb.debian.org/debian-security|${DEBIAN_MIRROR}/debian-security|g" \
+        -e "s|deb.debian.org|${DEBIAN_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources; \
     else \
-      sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list; \
-      sed -i "s|security.debian.org|${DEBIAN_MIRROR}/debian-security|g" /etc/apt/sources.list; \
+      sed -i \
+        -e "s|security.debian.org/debian-security|${DEBIAN_MIRROR}/debian-security|g" \
+        -e "s|deb.debian.org/debian-security|${DEBIAN_MIRROR}/debian-security|g" \
+        -e "s|deb.debian.org|${DEBIAN_MIRROR}|g" \
+        /etc/apt/sources.list; \
     fi; \
     apt-get update; \
     apt-get -y upgrade; \
     apt-get install -y --no-install-recommends \
-      openssh-server git curl wget vim ca-certificates tzdata tmux xz-utils \
+      openssh-server git curl wget aria2 vim ca-certificates tzdata tmux xz-utils \
       inetutils-ping iproute2 net-tools traceroute procps \
       bubblewrap bash-completion build-essential pkg-config cmake ninja-build meson \
       gdb strace ltrace valgrind shellcheck jq less file unzip zip rsync socat lsof \
@@ -101,7 +113,7 @@ RUN set -eux; \
     . /etc/os-release; \
     printf '%s\n' \
       'Types: deb' \
-      'URIs: https://download.docker.com/linux/debian' \
+      'URIs: https://mirrors.ustc.edu.cn/docker-ce/linux/debian' \
       "Suites: ${VERSION_CODENAME}" \
       'Components: stable' \
       "Architectures: $(dpkg --print-architecture)" \
@@ -119,22 +131,24 @@ RUN set -eux; \
     printf '%s\n' \
       'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' \
       > /etc/apt/sources.list.d/cloudflared.list; \
+    target_arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "${target_arch}" in \
+      amd64) s6_arch="x86_64"; code_arch="amd64"; code_sha256="a1cb96f64d5c68736764726cd3b0c9b6e500bdc30cfefebc05f59259149380e2" ;; \
+      arm64) s6_arch="aarch64"; code_arch="arm64"; code_sha256="e705774c0680e1feb573d38da3b838dde1466573f8621ce4b2414fcf3e64a01f" ;; \
+      *) echo "Unsupported target architecture: ${target_arch}" >&2; exit 1 ;; \
+    esac; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
       docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
       docker-ce-rootless-extras "tailscale=${TAILSCALE_VERSION}" cloudflared; \
     rm -rf /var/lib/apt/lists/*; \
     groupadd --gid 1000 dockerd; \
-    useradd --uid 1000 --gid dockerd --create-home --shell /usr/sbin/nologin dockerd; \
+    useradd --uid 1000 --gid dockerd --home-dir /run/user/1000/home \
+      --no-create-home --shell /usr/sbin/nologin dockerd; \
     printf '%s\n' 'dockerd:100000:65536' >> /etc/subuid; \
     printf '%s\n' 'dockerd:100000:65536' >> /etc/subgid; \
     ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime; \
     dpkg-reconfigure -f noninteractive tzdata; \
-    case "${TARGETARCH:-amd64}" in \
-      amd64) s6_arch="x86_64"; code_arch="amd64"; code_sha256="a1cb96f64d5c68736764726cd3b0c9b6e500bdc30cfefebc05f59259149380e2" ;; \
-      arm64) s6_arch="aarch64"; code_arch="arm64"; code_sha256="e705774c0680e1feb573d38da3b838dde1466573f8621ce4b2414fcf3e64a01f" ;; \
-      *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
     curl -fsSLO --retry 3 --retry-all-errors \
       "https://github.com/just-containers/s6-overlay/releases/download/${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz"; \
     curl -fsSLO --retry 3 --retry-all-errors \
@@ -155,26 +169,24 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends /tmp/code-server.deb; \
     rm -f /tmp/code-server.deb; \
     rm -rf /var/lib/apt/lists/*; \
-    mkdir -p /run/sshd /run/tailscale /run/user /run/env-manager /root/.ssh /workspace; \
+    mkdir -p /run/sshd /run/tailscale /run/user /run/env-manager; \
     install -d -m 0755 /etc/nginx/certs; \
     install -d -m 0700 -o dockerd -g dockerd /run/user/1000; \
-    touch /root/.ssh/authorized_keys; \
-    chmod 700 /root/.ssh; \
-    chmod 600 /root/.ssh/authorized_keys; \
-    cp /etc/skel/.bashrc /root/.bashrc; \
-    cp /etc/skel/.profile /root/.profile; \
-    { \
-        echo ""; \
-        echo "# --- Docker Injected Env Vars ---"; \
-        echo "export TZ=${TZ}"; \
-        echo "export LANG=${LANG}"; \
-        echo "export UV_LINK_MODE=${UV_LINK_MODE}"; \
-        echo "export UV_COMPILE_BYTECODE=${UV_COMPILE_BYTECODE}"; \
-        echo "export DOCKER_HOST=${DOCKER_HOST}"; \
-        echo '# UV Auto Completion'; \
-        echo 'eval "$(uv generate-shell-completion bash)"'; \
-    } >> /root/.bashrc; \
-    tar -czf /usr/share/root_backup.tar.gz -C / root
+    true
+
+RUN set -eux; \
+    printf '%s\n' \
+      'Acquire::Retries "3";' \
+      'Acquire::https::Timeout "30";' \
+      'Acquire::http::Timeout "30";' \
+      > /etc/apt/apt.conf.d/80-rabbit-network; \
+    if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+      sed -i "s|http://${DEBIAN_MIRROR}|https://${DEBIAN_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources; \
+    else \
+      sed -i "s|http://${DEBIAN_MIRROR}|https://${DEBIAN_MIRROR}|g" \
+        /etc/apt/sources.list; \
+    fi
 
 COPY rootfs/ /
 COPY --from=manager-builder /out/docker-image-manager /usr/local/bin/docker-image-manager
@@ -192,6 +204,7 @@ RUN set -eux; \
       /etc/s6-overlay/s6-rc.d/manager/run \
       /etc/s6-overlay/s6-rc.d/env-manager/run \
       /usr/local/bin/docker-image-banner \
+      /usr/local/bin/startup-self-check \
       /usr/local/bin/configure-resolv \
       /usr/local/bin/resolver-web.js \
       /usr/local/bin/dev \
@@ -203,7 +216,17 @@ RUN set -eux; \
       /etc/s6-overlay/s6-rc.d/dockerd-rootless/run \
       /etc/s6-overlay/s6-rc.d/nginx/run \
       /etc/s6-overlay/s6-rc.d/tailscaled/run; \
+    printf '\n# Rabbit interactive terminal defaults\n[ -r /etc/rabbit-terminal.bash ] && . /etc/rabbit-terminal.bash\n' \
+      >> /etc/bash.bashrc; \
+    install -d -m 0700 /root/.ssh; \
+    ssh-keygen -q -t rsa -b 4096 -N '' -f /root/.ssh/ssh_host_rsa_key; \
+    ssh-keygen -q -t ecdsa -b 521 -N '' -f /root/.ssh/ssh_host_ecdsa_key; \
+    ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/ssh_host_ed25519_key; \
     /usr/sbin/sshd -t; \
+    rm -f /root/.ssh/ssh_host_rsa_key /root/.ssh/ssh_host_rsa_key.pub \
+      /root/.ssh/ssh_host_ecdsa_key /root/.ssh/ssh_host_ecdsa_key.pub \
+      /root/.ssh/ssh_host_ed25519_key /root/.ssh/ssh_host_ed25519_key.pub; \
+    rmdir /root/.ssh; \
     /usr/sbin/nginx -t
 
 WORKDIR /workspace
@@ -211,3 +234,46 @@ WORKDIR /workspace
 EXPOSE 22 80 443
 
 ENTRYPOINT ["/init"]
+
+FROM base AS cuda
+
+ARG TARGETARCH
+ARG CUDA_VERSION=13-3
+
+ENV PATH=/usr/local/cuda/bin:${PATH} \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64
+
+RUN set -eux; \
+    target_arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "${target_arch}" in \
+      amd64) cuda_arch="x86_64" ;; \
+      arm64) cuda_arch="sbsa" ;; \
+      *) echo "Unsupported CUDA target architecture: ${target_arch}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/cuda-keyring.deb --retry 3 --retry-all-errors \
+      "https://developer.download.nvidia.com/compute/cuda/repos/debian13/${cuda_arch}/cuda-keyring_1.1-1_all.deb"; \
+    dpkg -i /tmp/cuda-keyring.deb; \
+    rm -f /tmp/cuda-keyring.deb; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      "cuda-compiler-${CUDA_VERSION}" \
+      "cuda-gdb-${CUDA_VERSION}" \
+      "cuda-libraries-dev-${CUDA_VERSION}"; \
+    rm -rf /var/lib/apt/lists/*; \
+    test -x /usr/local/cuda/bin/nvcc; \
+    test -x /usr/local/cuda/bin/cuda-gdb
+
+RUN set -eux; \
+    printf '%s\n' \
+      'case ":${PATH}:" in' \
+      '  *:/usr/local/cuda/bin:*) ;;' \
+      '  *) PATH="/usr/local/cuda/bin:${PATH}" ;;' \
+      'esac' \
+      'case ":${LD_LIBRARY_PATH:-}:" in' \
+      '  *:/usr/local/cuda/lib64:*) ;;' \
+      '  *) LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ;;' \
+      'esac' \
+      'export PATH LD_LIBRARY_PATH' \
+      > /etc/profile.d/cuda.sh
+
+FROM base AS standard

@@ -8,7 +8,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { Resolver } = require('node:dns').promises;
 
-const stateFile = process.env.RESOLV_STATE_FILE || '/root/.rabbit-dev-container/resolver.json';
+const stateFile = process.env.RESOLV_STATE_FILE || '/root/.rabbit_container/resolver.json';
 const port = Number.parseInt(process.env.RESOLV_WEB_PORT || '8787', 10);
 const cloudflaredBin = process.env.CLOUDFLARED_BIN || 'cloudflared';
 const tunnelRuntimeDir = '/run/cloudflared';
@@ -179,11 +179,9 @@ async function testConfig(config) {
 }
 
 function saveConfig(config) {
-  fs.mkdirSync(path.dirname(stateFile), { recursive: true, mode: 0o700 });
-  try {
-    fs.chmodSync(path.dirname(stateFile), 0o700);
-  } catch {
-    // The state directory may be mounted with a fixed mode.
+  const stateDir = path.dirname(stateFile);
+  if (!fs.existsSync(stateDir)) {
+    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   }
   const temporary = `${stateFile}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify({ ...config, updated_at: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });

@@ -1,0 +1,221 @@
+#!/bin/bash
+set -u
+
+case "${STARTUP_SELF_CHECK:-true}" in
+    true|1|yes|on) ;;
+    false|0|no|off)
+        echo '[startup-check] SKIP startup self-check disabled'
+        exit 0
+        ;;
+    *)
+        echo '[startup-check] WARN STARTUP_SELF_CHECK must be true or false; running checks'
+        ;;
+esac
+
+check_timeout="${STARTUP_CHECK_TIMEOUT:-20}"
+if ! [[ "$check_timeout" =~ ^[0-9]+$ ]] || ((check_timeout < 1 || check_timeout > 120)); then
+    echo '[startup-check] WARN STARTUP_CHECK_TIMEOUT must be between 1 and 120; using 20 seconds'
+    check_timeout=20
+fi
+
+ok_count=0
+warn_count=0
+skip_count=0
+
+ok() {
+    ok_count=$((ok_count + 1))
+    printf '[startup-check] OK   %s\n' "$*"
+}
+
+warn() {
+    warn_count=$((warn_count + 1))
+    printf '[startup-check] WARN %s\n' "$*"
+}
+
+skip() {
+    skip_count=$((skip_count + 1))
+    printf '[startup-check] SKIP %s\n' "$*"
+}
+
+http_ready() {
+    curl --noproxy '*' -ksS -o /dev/null --connect-timeout 1 --max-time 2 "$1" >/dev/null 2>&1
+}
+
+tcp_ready() {
+    ss -H -ltn 'sport = :22' 2>/dev/null | grep -q .
+}
+
+primary_ready() {
+    tcp_ready || return 1
+    http_ready "http://${NGINX_UPSTREAM:-127.0.0.1:8080}/healthz" || return 1
+    if [ "${NGINX_ENABLE:-true}" = true ]; then
+        http_ready "https://127.0.0.1:${NGINX_HTTPS_PORT:-443}/" || return 1
+    fi
+}
+
+echo '[startup-check] ------------------------------------------------------------'
+echo '[startup-check] Rabbit container startup self-check'
+deadline=$((SECONDS + check_timeout))
+until primary_ready; do
+    ((SECONDS >= deadline)) && break
+    sleep 1
+done
+
+missing_tools=()
+for tool in bash git curl aria2c btop docker code-server nginx sshd uv; do
+    command -v "$tool" >/dev/null 2>&1 || missing_tools+=("$tool")
+done
+if ((${#missing_tools[@]} == 0)); then
+    ok 'toolchain: bash git curl aria2c btop docker code-server nginx sshd uv'
+else
+    warn "toolchain missing: ${missing_tools[*]}"
+fi
+
+if tcp_ready; then
+    ok 'SSH daemon is accepting connections on 127.0.0.1:22'
+else
+    warn 'SSH daemon is not accepting connections on 127.0.0.1:22'
+fi
+
+if [ -s /run/sshd/authorized_keys ]; then
+    if [ -s /root/.ssh/authorized_keys ]; then
+        ok 'SSH authorized keys loaded from /root/.ssh/authorized_keys'
+    else
+        ok 'SSH authorized keys loaded into the runtime fallback'
+    fi
+else
+    warn 'no SSH authorized key is configured'
+fi
+
+missing_host_keys=()
+for type in rsa ecdsa ed25519; do
+    [ -s "/root/.ssh/ssh_host_${type}_key" ] || missing_host_keys+=("$type")
+done
+if ((${#missing_host_keys[@]} == 0)); then
+    ok 'persistent SSH host keys: rsa ecdsa ed25519'
+else
+    warn "persistent SSH host keys missing: ${missing_host_keys[*]}"
+fi
+
+if http_ready "http://${NGINX_UPSTREAM:-127.0.0.1:8080}/healthz"; then
+    ok "code-server is ready at ${NGINX_UPSTREAM:-127.0.0.1:8080}"
+else
+    warn "code-server is not ready at ${NGINX_UPSTREAM:-127.0.0.1:8080}"
+fi
+
+if [ "${NGINX_ENABLE:-true}" = true ]; then
+    if http_ready "https://127.0.0.1:${NGINX_HTTPS_PORT:-443}/"; then
+        ok "Nginx HTTPS entrypoint is ready on port ${NGINX_HTTPS_PORT:-443}"
+    else
+        warn "Nginx HTTPS entrypoint is not ready on port ${NGINX_HTTPS_PORT:-443}"
+    fi
+else
+    skip 'Nginx HTTPS entrypoint is disabled'
+fi
+
+if [ "${RESOLV_WEB_ENABLE:-true}" != true ]; then
+    skip 'DNS manager is disabled'
+elif [ -z "${RESOLV_WEB_PASSWORD:-${PASSWORD:-}}" ] \
+    && [ "${RESOLV_WEB_ALLOW_UNAUTHENTICATED:-false}" != true ]; then
+    skip 'DNS manager requires a password or explicit unauthenticated mode'
+elif http_ready "http://127.0.0.1:${RESOLV_WEB_PORT:-8787}/api/resolver"; then
+    ok 'DNS manager API is ready'
+else
+    warn 'DNS manager API is not ready'
+fi
+
+if [ "${ENV_MANAGER_ENABLE:-true}" != true ]; then
+    skip 'environment manager is disabled'
+elif [ "${ENV_MANAGER_TLS_ENABLE:-false}" = true ] \
+    && http_ready "https://${ENV_MANAGER_BIND_ADDR:-127.0.0.1:8789}/healthz"; then
+    ok 'environment manager API is ready with TLS'
+elif [ "${ENV_MANAGER_TLS_ENABLE:-false}" != true ] \
+    && http_ready "http://${ENV_MANAGER_BIND_ADDR:-127.0.0.1:8789}/healthz"; then
+    ok 'environment manager API is ready'
+else
+    warn 'environment manager API is not ready'
+fi
+
+if [ "${MANAGER_ENABLE:-true}" != true ]; then
+    skip 'certificate manager is disabled'
+elif [ "${NGINX_ENABLE:-true}" != true ] \
+    || [ "${NGINX_UNIFIED_AUTH:-true}" != true ] \
+    || [ -z "${PASSWORD:-}" ]; then
+    skip 'certificate manager requires unified Nginx authentication'
+elif http_ready "http://127.0.0.1:${MANAGER_PORT:-8788}/healthz"; then
+    ok 'certificate manager API is ready'
+else
+    warn 'certificate manager API is not ready'
+fi
+
+config_root="${CONTAINER_CONFIG_DIR:-/root/.rabbit_container}"
+state_root="${CONTAINER_STATE_DIR:-/root/.rabbit-dev-container}"
+data_root="${CONTAINER_DATA_DIR:-/opt/.rabbit_container}"
+if [ -d "$config_root" ] && [ -r "$config_root" ] && [ -w "$config_root" ]; then
+    ok "configuration directory is accessible: ${config_root}"
+else
+    warn "configuration directory is not readable and writable: ${config_root}"
+fi
+if [ -d "$state_root" ] && [ -r "$state_root" ] && [ -w "$state_root" ]; then
+    ok "state directory is accessible: ${state_root}"
+else
+    warn "state directory is not readable and writable: ${state_root}"
+fi
+if [ -d "$data_root" ] && [ -r "$data_root" ] && [ -w "$data_root" ]; then
+    ok "data directory is accessible: ${data_root}"
+else
+    warn "data directory is not readable and writable: ${data_root}"
+fi
+
+persistent_missing=()
+for directory in /root /workspace /opt /home; do
+    [ -d "$directory" ] || persistent_missing+=("$directory")
+done
+if ((${#persistent_missing[@]} == 0)); then
+    ok 'persistent mount points exist: /root /workspace /opt /home'
+else
+    warn "persistent mount points missing: ${persistent_missing[*]}"
+fi
+
+if command -v nvcc >/dev/null 2>&1; then
+    cuda_release="$(nvcc --version 2>/dev/null | sed -n 's/.*release \([^,]*\).*/\1/p' | tail -1)"
+    ok "CUDA toolkit is installed${cuda_release:+ (release ${cuda_release})}"
+    if [ -c /dev/nvidiactl ]; then
+        ok 'NVIDIA device is available to the container'
+    else
+        skip 'NVIDIA device is not attached; CUDA compiler remains available'
+    fi
+else
+    skip 'standard image: CUDA toolkit is not installed'
+fi
+
+if [ "${TS_ENABLE:-false}" = true ]; then
+    if timeout 5 tailscale --socket=/run/tailscale/tailscaled.sock status >/dev/null 2>&1; then
+        ok 'Tailscale LocalAPI is ready'
+    else
+        warn 'Tailscale is enabled but not ready'
+    fi
+else
+    skip 'Tailscale is disabled'
+fi
+
+if [ "${DOCKERD_ROOTLESS_ENABLE:-false}" = true ]; then
+    if timeout 5 docker info >/dev/null 2>&1; then
+        ok 'rootless Docker daemon is ready'
+    else
+        warn 'rootless Docker is enabled but not ready'
+    fi
+else
+    skip 'rootless Docker daemon is disabled'
+fi
+
+if getent hosts localhost >/dev/null 2>&1; then
+    ok 'local name resolution works'
+else
+    warn 'local name resolution failed'
+fi
+
+printf '[startup-check] Summary: %d OK, %d WARN, %d SKIP\n' \
+    "$ok_count" "$warn_count" "$skip_count"
+echo '[startup-check] ------------------------------------------------------------'
+exit 0

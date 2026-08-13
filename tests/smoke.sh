@@ -3,13 +3,26 @@ set -Eeuo pipefail
 
 trap 'rc=$?; printf "Smoke test failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2; exit "$rc"' ERR
 
-image="${1:?usage: tests/smoke.sh IMAGE}"
+image="${1:?usage: tests/smoke.sh IMAGE [standard|cuda]}"
+variant="${2:-standard}"
+case "$variant" in
+    standard) expect_cuda=false ;;
+    cuda) expect_cuda=true ;;
+    *)
+        echo "Unsupported image variant: $variant" >&2
+        exit 2
+        ;;
+esac
 container="rabbit-dev-container-smoke-${RANDOM}"
 tls_container="${container}-tls"
+hostkey_container="${container}-hostkeys"
+persistence_container="${container}-persistence"
 tmpdir="$(mktemp -d)"
 cleanup() {
     docker rm -f "$container" >/dev/null 2>&1 || true
     docker rm -f "$tls_container" >/dev/null 2>&1 || true
+    docker rm -f "$hostkey_container" >/dev/null 2>&1 || true
+    docker rm -f "$persistence_container" >/dev/null 2>&1 || true
     rm -rf "$tmpdir"
 }
 trap cleanup EXIT
@@ -22,7 +35,7 @@ assert_config() {
     }
 }
 
-docker run --rm -i --entrypoint /bin/bash "$image" -se <<'IMAGE_SMOKE'
+docker run --rm -i --entrypoint /bin/bash -e EXPECT_CUDA="$expect_cuda" "$image" -se <<'IMAGE_SMOKE'
     set -e
     trap 'rc=$?; printf "Image smoke failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2; exit "$rc"' ERR
     command -v /init sshd code-server uv tailscale tailscaled cloudflared nginx openssl \
@@ -32,24 +45,37 @@ docker run --rm -i --entrypoint /bin/bash "$image" -se <<'IMAGE_SMOKE'
         /usr/local/bin/docker-image-manager /usr/local/bin/docker-image-env-manager \
         docker dockerd dockerd-rootless.sh newuidmap newgidmap \
         slirp4netns fuse-overlayfs ldd \
-        htop jq lsof ncdu tree dig mtr tcpdump rsync socat pstree strace \
+        htop jq lsof ncdu tree dig mtr tcpdump rsync socat pstree strace aria2c \
         sshfs fusermount3 node npm npx \
         bwrap btop iotop iftop sar nethogs killall \
         pip3 rg fdfind batcat cmake ninja meson gcc gdb ltrace valgrind shellcheck \
         git-lfs gawk gettext man screen zsh fish fzf entr parallel direnv sqlite3 \
         uuidgen lftp iperf3 ethtool tracepath brctl bsdtar zstd pigz rename >/dev/null
     test -x /usr/bin/true
+    if [ "$EXPECT_CUDA" = true ]; then
+        command -v nvcc cuda-gdb >/dev/null
+        nvcc --version | grep -q 'Cuda compilation tools'
+        bash -lc 'command -v nvcc cuda-gdb >/dev/null'
+    else
+        ! command -v nvcc >/dev/null
+        ! test -e /etc/profile.d/cuda.sh
+    fi
     command -v docker-rootlesskit >/dev/null || command -v rootlesskit >/dev/null
     getent passwd dockerd | grep "^dockerd:x:1000:1000:" >/dev/null
     grep -qx "dockerd:100000:65536" /etc/subuid
     grep -qx "dockerd:100000:65536" /etc/subgid
     docker buildx version >/dev/null
     docker compose version >/dev/null
+    test "$PWD" = /workspace
+    ! test -e /usr/share/root_backup.tar.gz
     bash -n /etc/s6-overlay/scripts/init-root \
         /etc/s6-overlay/scripts/configure-nginx \
         /etc/s6-overlay/scripts/configure-tailscale \
+        /etc/rabbit-terminal.bash \
+        /etc/profile.d/rabbit-terminal.sh \
         /usr/local/bin/configure-resolv \
         /usr/local/bin/docker-image-banner \
+        /usr/local/bin/startup-self-check \
         /usr/local/bin/dev /usr/local/bin/update-status \
         /etc/s6-overlay/s6-rc.d/runtime-status/run \
         /etc/s6-overlay/s6-rc.d/code-server/run \
@@ -59,22 +85,31 @@ docker run --rm -i --entrypoint /bin/bash "$image" -se <<'IMAGE_SMOKE'
         /etc/s6-overlay/s6-rc.d/resolver-web/run \
         /etc/s6-overlay/s6-rc.d/tailscaled/run
     node --check /usr/local/bin/resolver-web.js
+    bash --noprofile --norc -ic '
+        source /etc/rabbit-terminal.bash
+        alias ll | grep -F "ls -alF" >/dev/null
+        alias gs | grep -F "git status --short --branch" >/dev/null
+        alias bat | grep -F batcat >/dev/null
+        [[ "$PS1" == *rabbit* ]]
+    ' >/dev/null 2>&1
+    test "${CONTAINER_CONFIG_DIR}" = /root/.rabbit_container
+    test "${CONTAINER_DATA_DIR}" = /opt/.rabbit_container
     test "${CONTAINER_STATE_DIR}" = /root/.rabbit-dev-container
     test "${CODE_SERVER_USER_DATA_DIR}" = /root/.rabbit-dev-container/code-server
-    test "${RESOLV_STATE_FILE}" = /root/.rabbit-dev-container/resolver.json
+    test "${RESOLV_STATE_FILE}" = /root/.rabbit_container/resolver.json
     test "${TS_STATE_DIR}" = /root/.rabbit-dev-container/tailscale
     test "${ENV_MANAGER_BIND_ADDR}" = 127.0.0.1:8789
-    test "${ENV_MANAGER_CONFIG_DIR}" = /root/.rabbit-dev-container
-    test "${DOCKERD_DATA_ROOT}" = /root/.rabbit-dev-container/docker
-    test "${DOCKERD_CONFIG_DIR}" = /root/.rabbit-dev-container/dockerd/config
-    test "${DOCKERD_CACHE_DIR}" = /root/.rabbit-dev-container/dockerd/cache
+    test "${ENV_MANAGER_CONFIG_DIR}" = /root/.rabbit_container
+    test "${DOCKERD_DATA_ROOT}" = /opt/.rabbit_container/docker
+    test "${DOCKERD_CONFIG_DIR}" = /opt/.rabbit_container/dockerd/config
+    test "${DOCKERD_CACHE_DIR}" = /opt/.rabbit_container/dockerd/cache
     test "${NPM_CONFIG_CACHE}" = /root/.rabbit-dev-container/npm
     test "${UV_CACHE_DIR}" = /root/.rabbit-dev-container/uv
-    test "${MANAGER_CONFIG_DIR}" = /root/.rabbit-dev-container
+    test "${MANAGER_CONFIG_DIR}" = /root/.rabbit_container
     grep -Fq -- "--user-data-dir \"\$user_data_dir\"" /etc/s6-overlay/s6-rc.d/code-server/run
-    grep -Fq '/root/.rabbit-dev-container/resolver.json' /usr/local/bin/configure-resolv
+    grep -Fq '/root/.rabbit_container/resolver.json' /usr/local/bin/configure-resolv
     grep -Fq '/root/.rabbit-dev-container/tailscale' /etc/s6-overlay/s6-rc.d/tailscaled/run
-    grep -Fq "data_dir=\"\${DOCKERD_DATA_ROOT:-\${state_root}/docker}\"" \
+    grep -Fq "data_dir=\"\${DOCKERD_DATA_ROOT:-\${data_root}/docker}\"" \
         /etc/s6-overlay/s6-rc.d/dockerd-rootless/run
     grep -Fq -- "--data-root=\"\$data_dir\"" \
         /etc/s6-overlay/s6-rc.d/dockerd-rootless/run
@@ -238,15 +273,57 @@ docker run --rm -i --entrypoint /bin/bash "$image" -se <<'IMAGE_SMOKE'
         echo "Reserved DNS path was accepted" >&2
         exit 1
     fi
+    GITHUB_USER= /etc/s6-overlay/scripts/init-root >/dev/null
     sshd -t
 IMAGE_SMOKE
-docker run --rm --entrypoint /usr/sbin/sshd "$image" -T >"$tmpdir/sshd-config"
+docker run --rm --entrypoint /bin/bash \
+    -e GITHUB_USER= \
+    "$image" -c '/etc/s6-overlay/scripts/init-root >/dev/null; exec /usr/sbin/sshd -T' \
+    >"$tmpdir/sshd-config"
 assert_config '^clientaliveinterval 60$'
 assert_config '^clientalivecountmax 3$'
 assert_config '^tcpkeepalive yes$'
 assert_config '^passwordauthentication no$'
 assert_config '^pubkeyauthentication yes$'
 assert_config '^permitrootlogin (without-password|prohibit-password)$'
+assert_config '^authorizedkeysfile /root/.ssh/authorized_keys /run/sshd/authorized_keys$'
+assert_config '^hostkey /root/.ssh/ssh_host_rsa_key$'
+assert_config '^hostkey /root/.ssh/ssh_host_ecdsa_key$'
+assert_config '^hostkey /root/.ssh/ssh_host_ed25519_key$'
+
+for persistent_path in root workspace opt home; do
+    mkdir -p "$tmpdir/persistent/$persistent_path"
+    printf '%s\n' "preserve-$persistent_path" >"$tmpdir/persistent/$persistent_path/marker"
+done
+docker run -d \
+    --name "$persistence_container" \
+    -e GITHUB_USER= \
+    -e CODE_SERVER_AUTH=none \
+    -v "$tmpdir/persistent/root:/root" \
+    -v "$tmpdir/persistent/workspace:/workspace" \
+    -v "$tmpdir/persistent/opt:/opt" \
+    -v "$tmpdir/persistent/home:/home" \
+    "$image" >/dev/null
+for _ in {1..30}; do
+    if docker logs "$persistence_container" 2>&1 | grep -F 'Initialization done.' >/dev/null; then
+        break
+    fi
+    sleep 1
+done
+docker logs "$persistence_container" 2>&1 | grep -F 'Initialization done.' >/dev/null
+for _ in {1..30}; do
+    if docker logs "$persistence_container" 2>&1 \
+        | grep -F '[startup-check] Summary:' >/dev/null; then
+        break
+    fi
+    sleep 1
+done
+docker logs "$persistence_container" 2>&1 | grep -F '[startup-check] Summary:' >/dev/null
+for persistent_path in root workspace opt home; do
+    grep -Fxq "preserve-$persistent_path" "$tmpdir/persistent/$persistent_path/marker"
+done
+docker exec "$persistence_container" test -s /root/.ssh/ssh_host_ed25519_key
+docker rm -f "$persistence_container" >/dev/null
 
 ssh-keygen -q -t ed25519 -N '' -f "$tmpdir/id_ed25519"
 cp "$tmpdir/id_ed25519.pub" "$tmpdir/authorized_keys"
@@ -254,6 +331,11 @@ chmod 444 "$tmpdir/authorized_keys"
 # GitHub-hosted runners bind-mount files as the runner user, not root.
 chown 1001:1001 "$tmpdir/authorized_keys"
 original_keys="$(sha256sum "$tmpdir/authorized_keys")"
+ssh_state_dir="$tmpdir/root-state"
+mkdir -p "$ssh_state_dir/.ssh"
+cp "$tmpdir/authorized_keys" "$ssh_state_dir/.ssh/authorized_keys"
+chmod 700 "$ssh_state_dir/.ssh"
+chmod 600 "$ssh_state_dir/.ssh/authorized_keys"
 
 docker run -d \
     --name "$container" \
@@ -284,6 +366,11 @@ ssh -i "$tmpdir/id_ed25519" -p "$ssh_port" \
     -o BatchMode=yes -o ConnectTimeout=5 \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     root@127.0.0.1 'test "$(ps -p 1 -o comm=)" = s6-svscan'
+
+ssh -tt -i "$tmpdir/id_ed25519" -p "$ssh_port" \
+    -o BatchMode=yes -o ConnectTimeout=5 \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    root@127.0.0.1 2>&1 <<<"exit" | grep -F 'RABBIT DEV CONTAINER' >/dev/null
 
 for _ in {1..30}; do
     if docker logs "$container" 2>&1 | grep -F 'RABBIT DEV CONTAINER' >/dev/null; then
@@ -347,8 +434,53 @@ env_update="$(curl --noproxy '*' -fkS -X PUT \
     "https://smoke.example.test:${https_port}/env/api/config")"
 printf '%s\n' "$env_update" | jq -e '.reloads | map(select(.service == "code-server" and .status == "reloaded")) | length == 1' >/dev/null
 docker exec "$container" bash -c 'source /usr/local/bin/load-managed-env; test "$CODE_SERVER_WORKDIR" = /workspace/smoke'
-docker exec "$container" test -s /root/.rabbit-dev-container/env-manager.env
+docker exec "$container" test -s /root/.rabbit_container/env-manager.env
 [ "$original_keys" = "$(sha256sum "$tmpdir/authorized_keys")" ]
+
+docker run -d \
+    --name "$hostkey_container" \
+    -e GITHUB_USER= \
+    -e CODE_SERVER_AUTH=none \
+    -p 127.0.0.1::22 \
+    -v "$ssh_state_dir:/root" \
+    "$image" >/dev/null
+hostkey_ssh_port="$(docker port "$hostkey_container" 22/tcp | sed 's/.*://')"
+for _ in {1..30}; do
+    if ssh -i "$tmpdir/id_ed25519" -p "$hostkey_ssh_port" \
+        -o BatchMode=yes -o ConnectTimeout=2 \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        root@127.0.0.1 true 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+ssh -i "$tmpdir/id_ed25519" -p "$hostkey_ssh_port" \
+    -o BatchMode=yes -o ConnectTimeout=5 \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    root@127.0.0.1 true
+docker exec "$hostkey_container" test -s /root/.ssh/ssh_host_rsa_key
+docker exec "$hostkey_container" test -s /root/.ssh/ssh_host_ecdsa_key
+docker exec "$hostkey_container" test -s /root/.ssh/ssh_host_ed25519_key
+hostkey_fingerprint="$(docker exec "$hostkey_container" \
+    ssh-keygen -lf /root/.ssh/ssh_host_ed25519_key | awk '{print $2}')"
+docker rm -f "$hostkey_container" >/dev/null
+docker run -d \
+    --name "$hostkey_container" \
+    -e GITHUB_USER= \
+    -e CODE_SERVER_AUTH=none \
+    -v "$ssh_state_dir:/root" \
+    "$image" >/dev/null
+for _ in {1..30}; do
+    if docker exec "$hostkey_container" test -s /root/.ssh/ssh_host_ed25519_key \
+        && docker logs "$hostkey_container" 2>&1 | grep -F 'Initialization done.' >/dev/null; then
+        break
+    fi
+    sleep 1
+done
+docker logs "$hostkey_container" 2>&1 | grep -F 'Initialization done.' >/dev/null
+[ "$hostkey_fingerprint" = "$(docker exec "$hostkey_container" \
+    ssh-keygen -lf /root/.ssh/ssh_host_ed25519_key | awk '{print $2}')" ]
+docker rm -f "$hostkey_container" >/dev/null
 status_page="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
@@ -412,7 +544,7 @@ dns_apply="$(curl --noproxy '*' -fkS -X POST \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/dns/api/resolver/apply")"
 printf '%s\n' "$dns_apply" | jq -e '.applied == true' >/dev/null
-docker exec "$container" jq -e '.auto_config == false' /root/.rabbit-dev-container/resolver.json >/dev/null
+docker exec "$container" jq -e '.auto_config == false' /root/.rabbit_container/resolver.json >/dev/null
 manager_page="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
@@ -437,8 +569,8 @@ uploaded_json="$(curl --noproxy '*' -fkS -X POST \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/manage/api/certificate")"
 printf '%s\n' "$uploaded_json" | jq -e '.source == "uploaded" and (.names | index("uploaded.example.test")) != null' >/dev/null
-docker exec "$container" test -L /root/.rabbit-dev-container/tls/current
-docker exec "$container" test -f /root/.rabbit-dev-container/tls/current/tls.crt
+docker exec "$container" test -L /root/.rabbit_container/tls/current
+docker exec "$container" test -f /root/.rabbit_container/tls/current/tls.crt
 docker exec "$container" dev status | grep -F 'components:' >/dev/null
 docker exec "$container" dev routes | grep -F 'Echo' >/dev/null
 docker exec "$container" pgrep -x sshd >/dev/null
@@ -455,7 +587,7 @@ docker exec "$container" pgrep -af code-server \
     | grep -F -- '--user-data-dir /root/.rabbit-dev-container/code-server' >/dev/null
 docker exec "$container" pgrep -x nginx >/dev/null
 docker exec "$container" openssl x509 \
-    -in /root/.rabbit-dev-container/tls/current/tls.crt -noout -subject \
+    -in /root/.rabbit_container/tls/current/tls.crt -noout -subject \
     | grep -F 'uploaded.example.test' >/dev/null
 ! docker exec "$container" pgrep -x dockerd >/dev/null
 [ "$(docker inspect -f '{{.RestartCount}}' "$container")" = 0 ]

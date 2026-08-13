@@ -1,0 +1,23 @@
+services:
+  dev:
+    image: ghcr.io/rabbit-dayi/rabbit-dev-container:latest
+    environment:
+      PASSWORD: ${PASSWORD:?set PASSWORD in .env or the shell}
+      NGINX_SERVER_NAMES: ${NGINX_SERVER_NAMES:-_}
+      GITHUB_USER: ${GITHUB_USER:-rabbit-dayi}
+    ports:
+      - "2222:22"
+      - "80:80"
+      - "443:443"
+    volumes:
+      - rabbit-dev-container-root:/root
+      - rabbit-dev-container-workspace:/workspace
+      - rabbit-dev-container-opt:/opt
+      - rabbit-dev-container-home:/home
+    restart: unless-stopped
+
+volumes:
+  rabbit-dev-container-root:
+  rabbit-dev-container-workspace:
+  rabbit-dev-container-opt:
+  rabbit-dev-container-home:
