@@ -74,6 +74,7 @@ if [ "$unified_auth" = true ] && [ -n "${PASSWORD:-}" ]; then
 fi
 
 portal_path=/services
+workspace_path=/workspace
 status_path=/status
 status_json_path=/status.json
 dns_path=/dns
@@ -136,6 +137,7 @@ if [ -n "$service_links" ]; then
         validate_service_path "$service_path" \
             || fail "Service paths must be an absolute path without a trailing slash."
         [ "$service_path" != "$portal_path" ] \
+            && [ "$service_path" != "$workspace_path" ] \
             && [ "$service_path" != "$status_path" ] \
             && [ "$service_path" != "$status_json_path" ] \
             && [ "$service_path" != "$dns_path" ] \
@@ -192,7 +194,7 @@ default_cert="${default_cert_dir}/tls.crt"
 default_key="${default_cert_dir}/tls.key"
 mounted_cert=/etc/nginx/certs/tls.crt
 mounted_key=/etc/nginx/certs/tls.key
-manager_config_dir="${MANAGER_CONFIG_DIR:-/root/.rabbit-dev-container}"
+manager_config_dir="${MANAGER_CONFIG_DIR:-/root/.rabbit_container}"
 uploaded_cert="${manager_config_dir}/tls/current/tls.crt"
 uploaded_key="${manager_config_dir}/tls/current/tls.key"
 
@@ -304,7 +306,8 @@ cat >"$portal_file" <<'EOF'
     <h1>Internal services</h1>
     <section class="services" aria-label="Internal services">
 EOF
-printf '      <a class="service" href="/"><strong>code-server</strong><span>/</span></a>\n' >>"$portal_file"
+printf '      <a class="service" href="%s/"><strong>code-server</strong><span>%s/</span></a>\n' \
+    "$workspace_path" "$workspace_path" >>"$portal_file"
 for service_index in "${!service_names[@]}"; do
     printf '      <a class="service" href="%s/"><strong>%s</strong><span>%s/</span></a>\n' \
         "${service_paths[$service_index]}" \
@@ -397,8 +400,9 @@ cat >"$status_page" <<'EOF'
         <article class="component"><strong>${escapeHtml(componentLabels[key] || key)}</strong><span class="badge ${stateClass(state)}">${escapeHtml(stateLabel(state))}</span></article>
       `).join('');
       const usage = data.workspace_usage || 'unknown';
-      const mounts = Number.isFinite(Number(data.sshfs_mounts)) ? data.sshfs_mounts : 0;
-      document.getElementById('summary').textContent = `Workspace usage ${usage} · SSHFS mounts ${mounts}`;
+      const mounts = Number.isFinite(Number(data.fuse_mounts)) ? data.fuse_mounts : 0;
+      const sshfsMounts = Number.isFinite(Number(data.sshfs_mounts)) ? data.sshfs_mounts : 0;
+      document.getElementById('summary').textContent = `Workspace usage ${usage} · FUSE mounts ${mounts} · SSHFS ${sshfsMounts}`;
       document.getElementById('updated').textContent = data.generated_at ? `updated ${new Date(data.generated_at).toLocaleTimeString()}` : 'starting';
       const services = data.services || [];
       document.getElementById('services').innerHTML = services.length ? services.map((service) => `
@@ -425,7 +429,7 @@ EOF
 install -m 0644 /usr/local/share/docker-image/status.html "$status_page"
 if [ ! -s "$status_file" ] || ! jq -e . "$status_file" >/dev/null 2>&1; then
     cat >"$status_file" <<'EOF'
-{"generated_at":null,"hostname":"unknown","uptime_seconds":0,"workspace_usage":"unknown","memory_used_bytes":0,"memory_total_bytes":0,"memory_usage_percent":0,"load_average":["0","0","0"],"sshfs_mounts":0,"components":{},"services":[]}
+{"generated_at":null,"hostname":"unknown","uptime_seconds":0,"workspace_usage":"unknown","memory_used_bytes":0,"memory_total_bytes":0,"memory_usage_percent":0,"load_average":["0","0","0"],"fuse_mounts":0,"sshfs_mounts":0,"components":{},"services":[]}
 EOF
 fi
 chmod 0644 "$status_page" "$status_file"
@@ -585,6 +589,28 @@ write_default_proxy_location() {
     local protocol=$1
 
     cat >>"$config_file" <<EOF
+        location = / {
+            root ${runtime_dir};
+            try_files ${portal_path}/index.html =404;
+            default_type text/html;
+            add_header Cache-Control "no-store";
+        }
+
+        location ^~ ${workspace_path}/ {
+            proxy_pass http://${upstream}/;
+            proxy_http_version 1.1;
+            proxy_set_header Host \$http_host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Host \$http_host;
+            proxy_set_header X-Forwarded-Proto ${protocol};
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection \$connection_upgrade;
+            proxy_buffering off;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }
+
         location = /healthz {
             auth_basic off;
             proxy_pass http://${upstream}/healthz;

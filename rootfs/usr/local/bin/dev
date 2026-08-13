@@ -8,9 +8,9 @@ usage() {
 Usage: dev <command>
 
 Commands:
-  status    Show component, route, workspace, and SSHFS status (default)
+  status    Show component, route, workspace, and FUSE status (default)
   routes    List configured service routes
-  mounts    List FUSE and SSHFS mounts
+  mounts    List SSHFS, rclone, and other FUSE mounts
   versions  Show the main bundled tool versions
   help      Show this help
 EOF
@@ -24,6 +24,7 @@ status_json() {
     jq -r '
         "updated: " + (.generated_at // "starting"),
         "workspace: " + (.workspace_usage // "unknown"),
+        "fuse mounts: " + ((.fuse_mounts // 0) | tostring),
         "sshfs mounts: " + ((.sshfs_mounts // 0) | tostring),
         "",
         "components:",
@@ -57,6 +58,10 @@ versions() {
     code-server --version | head -n 1
     printf 'sshfs: '
     sshfs --version 2>&1 | sed -n '1p'
+    printf 'rclone: '
+    rclone version | sed -n '1p'
+    printf 'davfs2: '
+    mount.davfs --version 2>&1 | sed -n '1p'
     printf 'nginx: '
     nginx -v 2>&1 | sed 's|^nginx/|v|'
 }

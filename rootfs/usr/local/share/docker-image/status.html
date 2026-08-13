@@ -64,7 +64,7 @@
   <div class="topbar">
     <div class="topbar-inner">
       <a class="brand" href="/services/"><span class="brand-mark" aria-hidden="true"><span class="rabbit-face">🐰</span></span><span>Rabbit Dev Container</span></a>
-      <nav aria-label="主导航"><a href="/">工作区</a><a href="/dns/">DNS</a><a href="/manage/">证书</a></nav>
+      <nav aria-label="主导航"><a href="/workspace/">工作区</a><a href="/dns/">DNS</a><a href="/manage/">证书</a></nav>
     </div>
   </div>
   <main>
@@ -118,7 +118,7 @@
       document.getElementById('load').textContent = (data.load_average || []).join(' / ') || '--';
       document.getElementById('uptime').textContent = formatUptime(data.uptime_seconds);
       document.getElementById('hostname').textContent = data.hostname || '--';
-      document.getElementById('mounts').textContent = `SSHFS ${Number(data.sshfs_mounts) || 0}`;
+      document.getElementById('mounts').textContent = `FUSE ${Number(data.fuse_mounts) || 0} · SSHFS ${Number(data.sshfs_mounts) || 0}`;
 
       const components = Object.entries(data.components || {});
       const online = components.filter(([, value]) => value === 'up').length;

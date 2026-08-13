@@ -1,6 +1,6 @@
 #!/bin/bash
 
-state_file="${MANAGER_CONFIG_DIR:-/root/.rabbit-dev-container}/env-manager.env"
+state_file="${MANAGER_CONFIG_DIR:-/root/.rabbit_container}/env-manager.env"
 [ -r "$state_file" ] || return 0 2>/dev/null || exit 0
 
 while IFS='=' read -r name encoded; do

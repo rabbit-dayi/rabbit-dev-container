@@ -71,6 +71,7 @@ write_status() {
     local payload
     local tmp_file
     local workspace_usage
+    local fuse_mounts
     local sshfs_mounts
     local nginx_state
     local dockerd_state
@@ -90,6 +91,8 @@ write_status() {
 
     workspace_usage="$(df -P /workspace 2>/dev/null | awk 'NR == 2 {print $5}')"
     [ -n "$workspace_usage" ] || workspace_usage=unknown
+    fuse_mounts="$(awk '$3 ~ /^fuse([.]|$)/ {count++} END {print count + 0}' /proc/mounts 2>/dev/null)"
+    [ -n "$fuse_mounts" ] || fuse_mounts=0
     sshfs_mounts="$(awk '$3 == "fuse.sshfs" {count++} END {print count + 0}' /proc/mounts 2>/dev/null)"
     [ -n "$sshfs_mounts" ] || sshfs_mounts=0
     hostname_value="$(hostname 2>/dev/null || printf unknown)"
@@ -131,6 +134,7 @@ write_status() {
     payload="$(jq -cn \
         --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg workspace_usage "$workspace_usage" \
+        --argjson fuse_mounts "$fuse_mounts" \
         --argjson sshfs_mounts "$sshfs_mounts" \
         --arg hostname "$hostname_value" \
         --argjson uptime_seconds "$uptime_seconds" \
@@ -144,7 +148,7 @@ write_status() {
         --arg dockerd "$dockerd_state" \
         --arg tailscale "$tailscale_state" \
         --argjson services "$services_json" \
-        '{generated_at: $generated_at, hostname: $hostname, uptime_seconds: $uptime_seconds, workspace_usage: $workspace_usage, memory_used_bytes: $memory_used_bytes, memory_total_bytes: $memory_total_bytes, memory_usage_percent: $memory_usage_percent, load_average: $load_average, sshfs_mounts: $sshfs_mounts, components: {ssh: $ssh, code_server: $code_server, nginx: $nginx, dockerd: $dockerd, tailscale: $tailscale}, services: $services}')"
+        '{generated_at: $generated_at, hostname: $hostname, uptime_seconds: $uptime_seconds, workspace_usage: $workspace_usage, memory_used_bytes: $memory_used_bytes, memory_total_bytes: $memory_total_bytes, memory_usage_percent: $memory_usage_percent, load_average: $load_average, fuse_mounts: $fuse_mounts, sshfs_mounts: $sshfs_mounts, components: {ssh: $ssh, code_server: $code_server, nginx: $nginx, dockerd: $dockerd, tailscale: $tailscale}, services: $services}')"
     install -d -m 0755 "$status_dir"
     tmp_file="$(mktemp "${status_file}.XXXXXX")"
     printf '%s\n' "$payload" >"$tmp_file"

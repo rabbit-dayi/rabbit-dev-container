@@ -27,7 +27,7 @@ import (
 var page []byte
 
 const (
-	defaultConfigDir = "/root/.rabbit-dev-container"
+	defaultConfigDir = "/root/.rabbit_container"
 	stateFileName    = "env-manager.env"
 	maxBodySize      = 512 << 10
 )

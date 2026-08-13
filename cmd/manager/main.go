@@ -29,7 +29,7 @@ import (
 const (
 	maxPEMSize       = 2 << 20
 	maxRequestSize   = 5 << 20
-	defaultConfigDir = "/root/.rabbit-dev-container"
+	defaultConfigDir = "/root/.rabbit_container"
 )
 
 type certificateInfo struct {
@@ -358,8 +358,6 @@ func (m *manager) installCertificate(certificatePEM, privateKeyPEM []byte, certi
 	if err := os.MkdirAll(versionsDir, 0o700); err != nil {
 		return errors.New("could not create certificate storage")
 	}
-	_ = os.Chmod(tlsRoot, 0o700)
-	_ = os.Chmod(versionsDir, 0o700)
 	stagingDir, err := os.MkdirTemp(versionsDir, ".upload-")
 	if err != nil {
 		return errors.New("could not stage certificate")

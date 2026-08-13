@@ -8,6 +8,7 @@ fi
 bind_addr="${CODE_SERVER_BIND_ADDR:-127.0.0.1:8080}"
 workdir="${CODE_SERVER_WORKDIR:-/workspace}"
 user_data_dir="${CODE_SERVER_USER_DATA_DIR:-/root/.rabbit-dev-container/code-server}"
+config_home="${CONTAINER_CONFIG_DIR:-/root/.rabbit_container}/xdg-config"
 
 if [ -n "${CODE_SERVER_AUTH+x}" ]; then
     auth="$CODE_SERVER_AUTH"
@@ -28,14 +29,15 @@ case "$auth" in
         ;;
 esac
 
-mkdir -p "$workdir" "$user_data_dir"
+mkdir -p "$user_data_dir"
+mkdir -p "$config_home"
 
 if [ "$auth" = "password" ] && [ -z "${PASSWORD:-}" ] && [ -z "${HASHED_PASSWORD:-}" ]; then
     echo "[code-server] CODE_SERVER_AUTH=password requires PASSWORD or HASHED_PASSWORD. Service will stay idle." >&2
     exec sleep infinity
 fi
 
-exec code-server \
+exec env XDG_CONFIG_HOME="$config_home" code-server \
     --bind-addr "$bind_addr" \
     --auth "$auth" \
     --disable-telemetry \

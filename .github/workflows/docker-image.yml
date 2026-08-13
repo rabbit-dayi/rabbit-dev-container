@@ -33,14 +33,29 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: rabbit-dev-container:smoke
+          target: standard
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Run smoke tests
         run: tests/smoke.sh rabbit-dev-container:smoke
 
+      - name: Build CUDA test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: rabbit-dev-container:cuda-smoke
+          target: cuda
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run CUDA smoke tests
+        run: tests/smoke.sh rabbit-dev-container:cuda-smoke cuda
+
   publish:
-    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name != 'pull_request'
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -72,13 +87,39 @@ jobs:
             type=ref,event=pr
             type=raw,value=latest,enable={{is_default_branch}}
 
+      - name: Extract CUDA Docker metadata
+        id: cuda-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+          tags: |
+            type=ref,event=branch,suffix=-cuda
+            type=ref,event=tag,suffix=-cuda
+            type=ref,event=pr,suffix=-cuda
+            type=raw,value=cuda,enable={{is_default_branch}}
+
       - name: Build and publish
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
+          target: standard
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and publish CUDA
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          target: cuda
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.cuda-meta.outputs.tags }}
+          labels: ${{ steps.cuda-meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

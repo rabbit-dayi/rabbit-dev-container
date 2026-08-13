@@ -1,0 +1,6 @@
+services:
+  dev:
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
