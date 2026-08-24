@@ -96,7 +96,7 @@
     function sourceName(value) { return ({managed:'面板', environment:'环境', default:'默认'}[value] || value); }
     function inputFor(setting) {
       const value = setting.secret ? '' : setting.value;
-      if (['CODE_SERVER_AUTH', 'TS_ENABLE', 'TS_AUTH_ONCE', 'TS_ACCEPT_DNS'].includes(setting.name)) {
+      if (['CODE_SERVER_AUTH', 'TS_ENABLE', 'TS_AUTH_ONCE', 'TS_ACCEPT_DNS', 'PLUGIN_FRPC_ENABLE', 'PLUGIN_CLOAKBROWSER_ENABLE'].includes(setting.name)) {
         const values = setting.name === 'CODE_SERVER_AUTH' ? ['password', 'none'] : ['true', 'false'];
         return `<select data-key="${escapeHtml(setting.name)}">${values.map((option) => `<option value="${option}" ${value === option ? 'selected' : ''}>${option}</option>`).join('')}</select>`;
       }

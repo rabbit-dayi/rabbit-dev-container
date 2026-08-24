@@ -49,10 +49,41 @@ type certificateInfo struct {
 }
 
 type manager struct {
-	configDir    string
-	configureBin string
-	nginxBin     string
-	mu           sync.Mutex
+	configDir          string
+	configureBin       string
+	nginxBin           string
+	pluginRegistryPath string
+	statusFilePath     string
+	mu                 sync.Mutex
+}
+
+type pluginRegistryEntry struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	EnableEnv   string   `json:"enable_env"`
+	Service     string   `json:"service"`
+	Requires    []string `json:"requires"`
+	ConfigPath  *string  `json:"config_path"`
+	ProcessName *string  `json:"process_name"`
+	WebPath     *string  `json:"web_path"`
+	WebPort     *int     `json:"web_port"`
+	DocsURL     string   `json:"docs_url"`
+}
+
+type pluginView struct {
+	pluginRegistryEntry
+	Enabled bool   `json:"enabled"`
+	State   string `json:"state"`
+}
+
+type statusSnapshot struct {
+	Components map[string]string `json:"components"`
+	Services   []struct {
+		Name  string `json:"name"`
+		Path  string `json:"path"`
+		State string `json:"state"`
+	} `json:"services"`
 }
 
 func main() {
@@ -70,13 +101,16 @@ func main() {
 	}
 
 	m := &manager{
-		configDir:    configDir,
-		configureBin: envOrDefault("MANAGER_CONFIGURE_BIN", "/etc/s6-overlay/scripts/configure-nginx"),
-		nginxBin:     envOrDefault("MANAGER_NGINX_BIN", "/usr/sbin/nginx"),
+		configDir:          configDir,
+		configureBin:       envOrDefault("MANAGER_CONFIGURE_BIN", "/etc/s6-overlay/scripts/configure-nginx"),
+		nginxBin:           envOrDefault("MANAGER_NGINX_BIN", "/usr/sbin/nginx"),
+		pluginRegistryPath: envOrDefault("PLUGIN_REGISTRY_FILE", "/etc/rabbit-plugins/registry.json"),
+		statusFilePath:     envOrDefault("MANAGER_STATUS_FILE", "/run/nginx/status/status.json"),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", m.health)
 	mux.HandleFunc("/api/certificate", m.certificate)
+	mux.HandleFunc("/api/plugins", m.plugins)
 
 	server := &http.Server{
 		Addr:              net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
@@ -136,6 +170,73 @@ func (m *manager) certificate(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 	}
+}
+
+func (m *manager) plugins(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	entries, err := m.readPluginRegistry()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	status := m.readStatusSnapshot()
+	views := make([]pluginView, 0, len(entries))
+	for _, entry := range entries {
+		views = append(views, m.viewForPlugin(entry, status))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"plugins": views})
+}
+
+func (m *manager) readPluginRegistry() ([]pluginRegistryEntry, error) {
+	data, err := os.ReadFile(m.pluginRegistryPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []pluginRegistryEntry{}, nil
+		}
+		return nil, errors.New("could not read the plugin registry")
+	}
+	var entries []pluginRegistryEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, errors.New("plugin registry is not valid JSON")
+	}
+	return entries, nil
+}
+
+// readStatusSnapshot is best-effort: status.json is written periodically by
+// update-status, so a missing or stale file just means plugin state reports
+// as "unknown" rather than failing the whole request.
+func (m *manager) readStatusSnapshot() statusSnapshot {
+	var snapshot statusSnapshot
+	data, err := os.ReadFile(m.statusFilePath)
+	if err != nil {
+		return snapshot
+	}
+	_ = json.Unmarshal(data, &snapshot)
+	return snapshot
+}
+
+func (m *manager) viewForPlugin(entry pluginRegistryEntry, status statusSnapshot) pluginView {
+	view := pluginView{pluginRegistryEntry: entry, State: "unknown"}
+	if entry.WebPath != nil {
+		for _, service := range status.Services {
+			if service.Path == *entry.WebPath {
+				view.Enabled = true
+				view.State = service.State
+				return view
+			}
+		}
+		return view
+	}
+	if entry.ProcessName != nil {
+		if state, ok := status.Components["plugin_"+entry.ID]; ok {
+			view.State = state
+			view.Enabled = state != "disabled"
+		}
+	}
+	return view
 }
 
 func (m *manager) uploadCertificate(w http.ResponseWriter, r *http.Request) {

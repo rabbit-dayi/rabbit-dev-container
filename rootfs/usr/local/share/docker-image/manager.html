@@ -49,6 +49,22 @@
     .message { min-height: 20px; margin: 16px 0 0; color: #5b6660; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
     .message.error { color: #a33c35; }
     .source-badge { display: inline-flex; min-height: 25px; align-items: center; padding: 3px 8px; border: 1px solid #b8ccc2; border-radius: 5px; color: #23694f; background: #eef8f3; font: 700 12px ui-monospace, monospace; }
+    .plugins-panel { margin-top: 18px; }
+    .plugins-list { display: grid; gap: 10px; margin-top: 4px; }
+    .plugin-card { padding: 14px; border: 1px solid #e3e8e5; border-radius: 6px; }
+    .plugin-card-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .plugin-name { font-weight: 750; }
+    .plugin-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; text-transform: uppercase; white-space: nowrap; }
+    .plugin-badge::before { width: 8px; height: 8px; border-radius: 50%; background: #8a958e; content: ''; }
+    .plugin-badge.up { color: #16734e; }
+    .plugin-badge.up::before { background: #22a06b; }
+    .plugin-badge.down { color: #a33c35; }
+    .plugin-badge.down::before { background: #d55248; }
+    .plugin-description { margin: 8px 0 0; color: #5b6660; font-size: 13px; line-height: 1.5; }
+    .plugin-meta { margin: 8px 0 0; color: #68736d; font-size: 12px; overflow-wrap: anywhere; }
+    .plugin-meta a { color: #1d7659; font-weight: 700; text-decoration: none; }
+    .plugin-meta a:hover, .plugin-meta a:focus-visible { text-decoration: underline; }
+    .plugin-empty { margin: 0; color: #68736d; font-size: 13px; }
     @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } header { align-items: flex-start; flex-direction: column; gap: 12px; } nav { gap: 12px; } .topbar-inner { width: min(100% - 24px, 1080px); } main { width: min(100% - 24px, 1080px); padding-top: 24px; } }
     @media (max-width: 460px) { nav a:first-child { display: none; } .facts { grid-template-columns: 1fr; } .facts div { display: block; padding: 10px 0; border-bottom: 1px solid #edf0ee; } dt, dd { padding: 2px 0; border: 0; } }
   </style>
@@ -91,8 +107,16 @@
         </div>
       </section>
     </div>
+    <section class="panel plugins-panel" aria-labelledby="plugins-title">
+      <div class="panel-body">
+        <h2 id="plugins-title">插件</h2>
+        <p class="hint" style="margin: -8px 0 4px; color: #68736d; font-size: 13px; line-height: 1.5;">在 <a href="/env/" style="color: #1d7659; font-weight: 700; text-decoration: underline;">环境变量管理</a> 中启用或停用插件；这里展示已注册插件目录和当前运行状态。</p>
+        <div id="plugins-list" class="plugins-list"><p class="plugin-empty">正在读取插件列表...</p></div>
+      </div>
+    </section>
   </main>
   <script>
+    const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
     const fields = ['names', 'subject', 'issuer', 'expires', 'remaining', 'fingerprint'];
     const state = document.getElementById('state');
     const source = document.getElementById('source');
@@ -159,6 +183,51 @@
       showMessage(error.message, true);
       fields.forEach((field) => { document.getElementById(field).textContent = '--'; });
     });
+
+    function pluginBadge(plugin) {
+      if (!plugin.enabled) return { cls: '', text: '未启用' };
+      if (plugin.state === 'up') return { cls: 'up', text: '运行中' };
+      if (plugin.state === 'down') return { cls: 'down', text: '未连接' };
+      return { cls: '', text: '状态未知' };
+    }
+
+    function renderPlugins(plugins) {
+      const list = document.getElementById('plugins-list');
+      if (!plugins.length) {
+        list.innerHTML = '<p class="plugin-empty">没有注册插件。</p>';
+        return;
+      }
+      list.innerHTML = plugins.map((plugin) => {
+        const badge = pluginBadge(plugin);
+        const requires = (plugin.requires || []).length ? `依赖：${plugin.requires.join(', ')}` : '';
+        const metaParts = [escapeHtml(plugin.enable_env)];
+        if (requires) metaParts.push(escapeHtml(requires));
+        if (plugin.docs_url) metaParts.push(`<a href="${escapeHtml(plugin.docs_url)}" target="_blank" rel="noreferrer">文档</a>`);
+        return `
+          <article class="plugin-card">
+            <div class="plugin-card-header">
+              <span class="plugin-name">${escapeHtml(plugin.name)}</span>
+              <span class="plugin-badge ${badge.cls}">${badge.text}</span>
+            </div>
+            <p class="plugin-description">${escapeHtml(plugin.description || '')}</p>
+            <p class="plugin-meta">${metaParts.join(' · ')}</p>
+          </article>
+        `;
+      }).join('');
+    }
+
+    async function refreshPlugins() {
+      try {
+        const response = await fetch('/manage/api/plugins', { cache: 'no-store' });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+        renderPlugins(payload.plugins || []);
+      } catch (error) {
+        document.getElementById('plugins-list').innerHTML = `<p class="plugin-empty">${escapeHtml(error.message)}</p>`;
+      }
+    }
+
+    refreshPlugins();
   </script>
 </body>
 </html>

@@ -1,0 +1,22 @@
+#!/bin/bash
+set -euo pipefail
+
+if [ -r /usr/local/bin/load-managed-env ]; then
+    source /usr/local/bin/load-managed-env
+fi
+
+if [ "${__PLUGIN_ENABLE_VAR__:-false}" != "true" ]; then
+    echo "[plugin-__PLUGIN_ID__] Disabled. Set __PLUGIN_ENABLE_VAR__=true to enable this plugin."
+    exec sleep infinity
+fi
+
+# TODO: check any other preconditions this plugin needs (a config file that
+# must exist, another service/socket it depends on, required credentials).
+# On any missing precondition, log one line explaining what's missing and
+# `exec sleep infinity` -- never exit non-zero, or s6 will treat this as a
+# crash and restart-loop it.
+
+# TODO: exec the plugin's process in the foreground (no `docker run -d`, no
+# backgrounding). s6 supervises this process directly and restarts it on
+# unexpected exit, the same way it does for tailscaled/dockerd-rootless.
+exec true

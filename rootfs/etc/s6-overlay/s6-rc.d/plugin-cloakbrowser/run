@@ -1,0 +1,47 @@
+#!/bin/bash
+set -euo pipefail
+
+if [ -r /usr/local/bin/load-managed-env ]; then
+    source /usr/local/bin/load-managed-env
+fi
+
+if [ "${PLUGIN_CLOAKBROWSER_ENABLE:-false}" != "true" ]; then
+    echo "[plugin-cloakbrowser] Disabled. Set PLUGIN_CLOAKBROWSER_ENABLE=true to enable the CloakBrowser-Manager plugin."
+    exec sleep infinity
+fi
+
+if [ "${DOCKERD_ROOTLESS_ENABLE:-false}" != "true" ]; then
+    echo "[plugin-cloakbrowser] Requires rootless Docker-in-Docker; set DOCKERD_ROOTLESS_ENABLE=true." >&2
+    exec sleep infinity
+fi
+
+port="${PLUGIN_CLOAKBROWSER_PORT:-18180}"
+if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
+    echo "[plugin-cloakbrowser] PLUGIN_CLOAKBROWSER_PORT must be between 1 and 65535." >&2
+    exec sleep infinity
+fi
+
+socket_path="${DOCKER_HOST#unix://}"
+timeout="${PLUGIN_CLOAKBROWSER_DOCKER_TIMEOUT:-60}"
+for ((elapsed = 0; elapsed < timeout; elapsed++)); do
+    [ -S "$socket_path" ] && break
+    sleep 1
+done
+if [ ! -S "$socket_path" ]; then
+    echo "[plugin-cloakbrowser] Timed out waiting for the rootless Docker socket at ${socket_path}." >&2
+    exec sleep infinity
+fi
+
+# CloakBrowser-Manager (https://github.com/CloakHQ/CloakBrowser-Manager) is a
+# third-party stealth-browser profile manager, not maintained by this
+# project. It's opt-in and runs unmodified as the vendor's own image; bring
+# your own license/account. Running it in the foreground here means s6
+# supervises restarts the same way it does for any other longrun.
+container_name=rabbit-plugin-cloakbrowser
+docker rm -f "$container_name" >/dev/null 2>&1 || true
+
+exec docker run --rm --name "$container_name" \
+    -p "127.0.0.1:${port}:8080" \
+    -v cloakbrowser-profiles:/data \
+    -e "CLOAKBROWSER_LICENSE_KEY=${CLOAKBROWSER_LICENSE_KEY:-}" \
+    cloakhq/cloakbrowser-manager

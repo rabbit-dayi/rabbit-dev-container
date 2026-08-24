@@ -1,0 +1,19 @@
+#!/bin/bash
+set -euo pipefail
+
+if [ -r /usr/local/bin/load-managed-env ]; then
+    source /usr/local/bin/load-managed-env
+fi
+
+if [ "${PLUGIN_FRPC_ENABLE:-false}" != "true" ]; then
+    echo "[plugin-frpc] Disabled. Set PLUGIN_FRPC_ENABLE=true to enable the frpc plugin."
+    exec sleep infinity
+fi
+
+config_file="${PLUGIN_FRPC_CONFIG:-/root/.rabbit_container/plugins/frpc/frpc.toml}"
+if [ ! -r "$config_file" ]; then
+    echo "[plugin-frpc] Waiting for a config file at ${config_file} (see README for an example frpc.toml)." >&2
+    exec sleep infinity
+fi
+
+exec "${PLUGIN_FRPC_BIN:-/usr/local/bin/frpc}" -c "$config_file"

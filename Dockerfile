@@ -18,6 +18,7 @@ ARG DEBIAN_MIRROR=mirrors.ustc.edu.cn
 ARG S6_OVERLAY_VERSION=v3.2.3.0
 ARG CODE_SERVER_VERSION=4.127.0
 ARG TAILSCALE_VERSION=1.98.8
+ARG FRPC_VERSION=0.71.0
 ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -72,7 +73,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ENV_MANAGER_CONFIG_DIR=/root/.rabbit_container \
     ENV_MANAGER_USERNAME=admin \
     ENV_MANAGER_TLS_ENABLE=false \
-    ENV_MANAGER_ALLOW_UNAUTHENTICATED=false
+    ENV_MANAGER_ALLOW_UNAUTHENTICATED=false \
+    PLUGIN_FRPC_ENABLE=false \
+    PLUGIN_CLOAKBROWSER_ENABLE=false \
+    PLUGIN_CLOAKBROWSER_PORT=18180
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -136,8 +140,10 @@ RUN set -eux; \
       > /etc/apt/sources.list.d/cloudflared.list; \
     target_arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     case "${target_arch}" in \
-      amd64) s6_arch="x86_64"; code_arch="amd64"; code_sha256="a1cb96f64d5c68736764726cd3b0c9b6e500bdc30cfefebc05f59259149380e2" ;; \
-      arm64) s6_arch="aarch64"; code_arch="arm64"; code_sha256="e705774c0680e1feb573d38da3b838dde1466573f8621ce4b2414fcf3e64a01f" ;; \
+      amd64) s6_arch="x86_64"; code_arch="amd64"; code_sha256="a1cb96f64d5c68736764726cd3b0c9b6e500bdc30cfefebc05f59259149380e2"; \
+        frpc_arch="amd64"; frpc_sha256="84f27e39f11169f7adcef8e8b70c9329de17747b1f14dad9fb95eef5682ea716" ;; \
+      arm64) s6_arch="aarch64"; code_arch="arm64"; code_sha256="e705774c0680e1feb573d38da3b838dde1466573f8621ce4b2414fcf3e64a01f"; \
+        frpc_arch="arm64"; frpc_sha256="f33c293c275d8fc68c654b6fba8f10b2551d6463d09a9fc9cffb7227eae82266" ;; \
       *) echo "Unsupported target architecture: ${target_arch}" >&2; exit 1 ;; \
     esac; \
     apt-get update; \
@@ -172,6 +178,12 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends /tmp/code-server.deb; \
     rm -f /tmp/code-server.deb; \
     rm -rf /var/lib/apt/lists/*; \
+    curl -fsSLo /tmp/frpc.tar.gz --retry 3 --retry-all-errors \
+      "https://github.com/fatedier/frp/releases/download/v${FRPC_VERSION}/frp_${FRPC_VERSION}_linux_${frpc_arch}.tar.gz"; \
+    echo "${frpc_sha256}  /tmp/frpc.tar.gz" | sha256sum -c -; \
+    tar -C /tmp -xzf /tmp/frpc.tar.gz "frp_${FRPC_VERSION}_linux_${frpc_arch}/frpc"; \
+    install -m 0755 "/tmp/frp_${FRPC_VERSION}_linux_${frpc_arch}/frpc" /usr/local/bin/frpc; \
+    rm -rf /tmp/frpc.tar.gz "/tmp/frp_${FRPC_VERSION}_linux_${frpc_arch}"; \
     mkdir -p /run/sshd /run/tailscale /run/user /run/env-manager; \
     install -d -m 0755 /etc/nginx/certs; \
     install -d -m 0700 -o dockerd -g dockerd /run/user/1000; \
@@ -218,7 +230,9 @@ RUN set -eux; \
       /etc/s6-overlay/s6-rc.d/code-server/run \
       /etc/s6-overlay/s6-rc.d/dockerd-rootless/run \
       /etc/s6-overlay/s6-rc.d/nginx/run \
-      /etc/s6-overlay/s6-rc.d/tailscaled/run; \
+      /etc/s6-overlay/s6-rc.d/tailscaled/run \
+      /etc/s6-overlay/s6-rc.d/plugin-frpc/run \
+      /etc/s6-overlay/s6-rc.d/plugin-cloakbrowser/run; \
     printf '\n# Rabbit interactive terminal defaults\n[ -r /etc/rabbit-terminal.bash ] && . /etc/rabbit-terminal.bash\n' \
       >> /etc/bash.bashrc; \
     install -d -m 0700 /root/.ssh; \

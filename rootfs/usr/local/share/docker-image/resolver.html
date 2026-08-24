@@ -44,7 +44,21 @@
     .hint { margin: -4px 0 16px; color: #697572; font-size: 13px; line-height: 1.5; }
     .tunnel-status { min-height: 24px; margin: 16px 0 0; color: #51605d; overflow-wrap: anywhere; }
     .tunnel-status.error { color: #b3473c; }
-    .tunnel-link { display: inline-block; margin-top: 8px; font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+    button.small { min-height: 34px; padding: 6px 12px; font-size: 13px; }
+    .tunnel-list { display: grid; gap: 10px; margin-top: 14px; }
+    .tunnel-item { padding: 14px; border: 1px solid #e0e7e4; border-radius: 6px; }
+    .tunnel-item.crashed { border-color: #e4b1a9; background: #fff7f5; }
+    .tunnel-item-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .tunnel-target { font-family: ui-monospace, monospace; font-size: 13px; overflow-wrap: anywhere; }
+    .tunnel-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; text-transform: uppercase; white-space: nowrap; }
+    .tunnel-badge::before { width: 8px; height: 8px; border-radius: 50%; background: #85918e; content: ''; }
+    .tunnel-badge.up { color: #16734e; }
+    .tunnel-badge.up::before { background: #1ca66f; }
+    .tunnel-badge.down { color: #b3473c; }
+    .tunnel-badge.down::before { background: #d45b4c; }
+    .tunnel-link { display: block; margin-top: 8px; font-family: ui-monospace, monospace; font-size: 13px; overflow-wrap: anywhere; }
+    .tunnel-error { margin: 6px 0 0; color: #b3473c; font-size: 13px; overflow-wrap: anywhere; }
+    .tunnel-empty { margin: 14px 0 0; color: #697572; }
     @media (max-width: 560px) { body { padding: 16px; } header { align-items: flex-start; flex-direction: column; gap: 10px; } .fields, .checks { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -78,15 +92,14 @@
       <p id="meta" class="meta"></p>
     </section>
     <section class="panel">
-      <h2>临时 Cloudflare Tunnel</h2>
-      <p class="hint">把容器内的 HTTP 服务临时映射到公网测试。隧道只在当前容器运行期间存在，地址会随机变化，不写入持久化配置。也可以先查看 <a href="https://try.cloudflare.com/" target="_blank" rel="noreferrer">try.cloudflare.com</a>。</p>
+      <h2>Cloudflare 临时隧道</h2>
+      <p class="hint">把容器内的 HTTP 服务临时映射到公网测试。每个内部地址各自对应一条独立隧道，可以同时新建多条；隧道只在当前容器运行期间存在，地址会随机变化，不写入持久化配置。也可以先查看 <a href="https://try.cloudflare.com/" target="_blank" rel="noreferrer">try.cloudflare.com</a>。</p>
       <label>内部服务地址<input id="tunnel-target" type="text" inputmode="url" autocomplete="off" placeholder="127.0.0.1:8080"></label>
       <div class="actions">
-        <button id="tunnel-start" type="button">新建临时隧道</button>
-        <button id="tunnel-stop" class="secondary" type="button" disabled>停止隧道</button>
+        <button id="tunnel-start" type="button">新建隧道</button>
       </div>
       <p id="tunnel-status" class="tunnel-status" aria-live="polite">正在读取隧道状态...</p>
-      <a id="tunnel-link" class="tunnel-link" href="#" target="_blank" rel="noreferrer" hidden></a>
+      <div id="tunnel-list" class="tunnel-list" aria-live="polite"></div>
     </section>
   </main>
   <script>
@@ -100,6 +113,8 @@
     const labels = { local: '本地 DNS', fallback: '备用 DNS' };
     let statePath = '/root/.rabbit_container/resolver.json';
     let tunnelTimer;
+    const tunnelBusyIds = new Set();
+    const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 
     function configFromForm() {
       return {
@@ -162,69 +177,93 @@
       finally { setBusy(false); }
     });
 
-    function renderTunnel(payload) {
-      const target = document.getElementById('tunnel-target');
-      const status = document.getElementById('tunnel-status');
-      const link = document.getElementById('tunnel-link');
-      const start = document.getElementById('tunnel-start');
-      const stop = document.getElementById('tunnel-stop');
-      if (!target.value && payload.default_target) target.value = payload.default_target;
-      start.disabled = Boolean(payload.running);
-      stop.disabled = !payload.running;
-      status.className = `tunnel-status${payload.last_error ? ' error' : ''}`;
-      if (payload.running) {
-        status.textContent = `运行中：${payload.target || '未知目标'}`;
-      } else if (payload.last_error) {
-        status.textContent = `隧道已停止：${payload.last_error}`;
-      } else {
-        status.textContent = '当前没有运行中的临时隧道。';
-      }
-      if (payload.url) {
-        link.hidden = false;
-        link.href = payload.url;
-        link.textContent = payload.url;
-      } else {
-        link.hidden = true;
-        link.removeAttribute('href');
-        link.textContent = '';
-      }
+    function tunnelBadge(item) {
+      if (item.running) return { cls: 'up', text: '运行中' };
+      if (item.crashed) return { cls: 'down', text: '已断开' };
+      return { cls: 'down', text: '已停止' };
     }
 
-    async function refreshTunnel() {
+    function renderTunnels(payload) {
+      const target = document.getElementById('tunnel-target');
+      const status = document.getElementById('tunnel-status');
+      const list = document.getElementById('tunnel-list');
+      const items = payload.tunnels || [];
+      if (!target.value && payload.default_target) target.value = payload.default_target;
+
+      status.className = 'tunnel-status';
+      status.textContent = items.length ? `当前 ${items.length} 条隧道。` : '当前没有运行中的隧道。';
+
+      if (!items.length) {
+        list.innerHTML = '<p class="tunnel-empty">填写内部服务地址后点击“新建隧道”，可以同时新建多条。</p>';
+        return;
+      }
+
+      list.innerHTML = items.map((item) => {
+        const badge = tunnelBadge(item);
+        const busy = tunnelBusyIds.has(item.id);
+        return `
+          <article class="tunnel-item${item.crashed ? ' crashed' : ''}">
+            <div class="tunnel-item-header">
+              <span class="tunnel-target">${escapeHtml(item.target)}</span>
+              <span class="tunnel-badge ${badge.cls}">${badge.text}</span>
+            </div>
+            ${item.url ? `<a class="tunnel-link" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.url)}</a>` : ''}
+            ${item.last_error ? `<p class="tunnel-error">${escapeHtml(item.last_error)}</p>` : ''}
+            <div class="actions">
+              <button type="button" class="secondary small tunnel-stop" data-id="${escapeHtml(item.id)}"${busy ? ' disabled' : ''}>${item.running ? '停止' : '移除'}</button>
+            </div>
+          </article>
+        `;
+      }).join('');
+
+      list.querySelectorAll('.tunnel-stop').forEach((button) => {
+        button.addEventListener('click', () => stopOneTunnel(button.dataset.id));
+      });
+    }
+
+    async function refreshTunnels() {
+      clearTimeout(tunnelTimer);
       try {
         const payload = await get('tunnel');
-        renderTunnel(payload);
-        tunnelTimer = setTimeout(refreshTunnel, payload.running ? 2000 : 5000);
+        renderTunnels(payload);
+        const anyRunning = (payload.tunnels || []).some((item) => item.running);
+        tunnelTimer = setTimeout(refreshTunnels, anyRunning ? 2000 : 5000);
       } catch (error) {
         document.getElementById('tunnel-status').textContent = error.message;
         document.getElementById('tunnel-status').className = 'tunnel-status error';
-        tunnelTimer = setTimeout(refreshTunnel, 5000);
+        tunnelTimer = setTimeout(refreshTunnels, 5000);
       }
     }
 
     document.getElementById('tunnel-start').addEventListener('click', async () => {
-      const start = document.getElementById('tunnel-start');
-      const stop = document.getElementById('tunnel-stop');
-      start.disabled = true; stop.disabled = true;
-      document.getElementById('tunnel-status').textContent = '正在连接 Cloudflare...';
+      const button = document.getElementById('tunnel-start');
+      const status = document.getElementById('tunnel-status');
+      button.disabled = true;
+      status.className = 'tunnel-status';
+      status.textContent = '正在连接 Cloudflare...';
       try {
-        const payload = await call('tunnel/start', { target: document.getElementById('tunnel-target').value.trim() });
-        renderTunnel(payload);
+        await call('tunnel/start', { target: document.getElementById('tunnel-target').value.trim() });
+        await refreshTunnels();
       } catch (error) {
-        document.getElementById('tunnel-status').textContent = error.message;
-        document.getElementById('tunnel-status').className = 'tunnel-status error';
-        await refreshTunnel();
+        status.textContent = error.message;
+        status.className = 'tunnel-status error';
+      } finally {
+        button.disabled = false;
       }
     });
 
-    document.getElementById('tunnel-stop').addEventListener('click', async () => {
-      const start = document.getElementById('tunnel-start');
-      const stop = document.getElementById('tunnel-stop');
-      start.disabled = true; stop.disabled = true;
-      document.getElementById('tunnel-status').textContent = '正在停止隧道...';
-      try { renderTunnel(await call('tunnel/stop')); }
-      catch (error) { document.getElementById('tunnel-status').textContent = error.message; document.getElementById('tunnel-status').className = 'tunnel-status error'; }
-    });
+    async function stopOneTunnel(id) {
+      tunnelBusyIds.add(id);
+      try {
+        await call('tunnel/stop', { id });
+      } catch (error) {
+        document.getElementById('tunnel-status').textContent = error.message;
+        document.getElementById('tunnel-status').className = 'tunnel-status error';
+      } finally {
+        tunnelBusyIds.delete(id);
+        await refreshTunnels();
+      }
+    }
 
     fetch('/dns/api/resolver', { cache: 'no-store' }).then(async (response) => {
       const payload = await response.json();
@@ -240,7 +279,7 @@
       }
       meta.textContent = payload.password_protected ? `此页面使用 Basic Auth 保护；持久化位置：${statePath}` : '当前显式启用了无认证模式，请勿将此页面直接暴露到公网。';
     }).catch((error) => { source.textContent = error.message; source.className = 'source warning'; });
-    refreshTunnel();
+    refreshTunnels();
   </script>
 </body>
 </html>
