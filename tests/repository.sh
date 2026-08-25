@@ -24,6 +24,9 @@ fi
 
 git -C "$repo_root" grep -q -- 'ENV_MANAGER_ENABLE' -- README.md
 git -C "$repo_root" grep -q -- 'tests/smoke\.sh' -- README.md
+git -C "$repo_root" grep -q -- 'CLOUDFLARED_PROTOCOL' -- README.md
+git -C "$repo_root" grep -q -- 'PLUGIN_FRPC_ENABLE' -- README.md
+git -C "$repo_root" grep -q -- 'PLUGIN_CLOAKBROWSER_ENABLE' -- README.md
 git -C "$repo_root" grep -q -- 'ARG DEBIAN_MIRROR=mirrors\.ustc\.edu\.cn' -- Dockerfile
 git -C "$repo_root" grep -q -- 'CONTAINER_CONFIG_DIR=/root/\.rabbit_container' -- Dockerfile
 git -C "$repo_root" grep -q -- 'STARTUP_SELF_CHECK=true' -- Dockerfile

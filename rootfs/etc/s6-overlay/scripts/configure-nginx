@@ -119,6 +119,40 @@ declare -a service_names=()
 declare -a service_paths=()
 declare -a service_upstreams=()
 
+# Plugins with a web UI (see rootfs/etc/rabbit-plugins/registry.json) are
+# proxied the same way as NGINX_SERVICE_LINKS entries: this loop just seeds
+# the same arrays for every plugin whose enable_env is currently true, before
+# the NGINX_SERVICE_LINKS loop below runs its own path/name collision checks
+# against them.
+plugin_registry_file="${PLUGIN_REGISTRY_FILE:-/etc/rabbit-plugins/registry.json}"
+if [ -r "$plugin_registry_file" ]; then
+    plugin_registry_tsv="$(jq -r '.[] | [.id, .name, .enable_env, (.web_path // "null"), (.web_port // "null")] | @tsv' "$plugin_registry_file")" \
+        || fail "Could not read the plugin registry at ${plugin_registry_file}."
+    while IFS=$'\t' read -r plugin_id plugin_name plugin_enable_env plugin_web_path plugin_web_port; do
+        [ -n "$plugin_id" ] || continue
+        [ -n "$plugin_web_path" ] && [ "$plugin_web_path" != "null" ] || continue
+        [ -n "$plugin_web_port" ] && [ "$plugin_web_port" != "null" ] || continue
+        [ -n "$plugin_enable_env" ] || fail "Plugin ${plugin_id} in the registry has no enable_env."
+        enabled_value="${!plugin_enable_env:-false}"
+        [ "$enabled_value" = true ] || continue
+
+        validate_service_name "$plugin_name" \
+            || fail "Plugin ${plugin_id} has an invalid name in the registry."
+        validate_service_path "$plugin_web_path" \
+            || fail "Plugin ${plugin_id} has an invalid web_path in the registry."
+        validate_port "$plugin_web_port" \
+            || fail "Plugin ${plugin_id} has an invalid web_port in the registry."
+        for existing_path in "${service_paths[@]}"; do
+            [ "$plugin_web_path" != "$existing_path" ] \
+                || fail "Plugin ${plugin_id} web_path ${plugin_web_path} collides with another service."
+        done
+
+        service_names+=("$plugin_name")
+        service_paths+=("$plugin_web_path")
+        service_upstreams+=("127.0.0.1:$((10#$plugin_web_port))")
+    done <<<"$plugin_registry_tsv"
+fi
+
 if [ -n "$service_links" ]; then
     [[ "$service_links" != \;* ]] \
         && [[ "$service_links" != *\; ]] \

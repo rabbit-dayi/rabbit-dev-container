@@ -39,6 +39,8 @@ type settingDefinition struct {
 	Default     string
 	Secret      bool
 	Reload      string
+	// Service names the s6 longrun to restart when Reload == "plugin".
+	Service string
 }
 
 type settingView struct {
@@ -84,6 +86,8 @@ type manager struct {
 	allowUnauthenticated bool
 	s6SvcBin             string
 	reloadTailscaleBin   string
+	configureNginxBin    string
+	nginxBin             string
 
 	mu        sync.Mutex
 	overrides map[string]string
@@ -106,6 +110,9 @@ var definitions = []settingDefinition{
 	{Name: "TS_CONFIG_TIMEOUT", Group: "Tailscale", Description: "Tailscale 配置等待时间，单位为秒。", Default: "30", Reload: "tailscale"},
 	{Name: "TZ", Group: "运行时", Description: "容器时区。", Default: "Asia/Shanghai", Reload: "restart"},
 	{Name: "LANG", Group: "运行时", Description: "容器语言环境。", Default: "C.UTF-8", Reload: "restart"},
+	{Name: "PLUGIN_FRPC_ENABLE", Group: "插件", Description: "是否启用 frpc 插件；需要先把 frpc.toml 放到 /root/.rabbit_container/plugins/frpc/。", Default: "false", Reload: "plugin", Service: "plugin-frpc"},
+	{Name: "PLUGIN_CLOAKBROWSER_ENABLE", Group: "插件", Description: "是否启用 CloakBrowser-Manager 插件（第三方组件，需先启用 DOCKERD_ROOTLESS_ENABLE）。", Default: "false", Reload: "plugin", Service: "plugin-cloakbrowser"},
+	{Name: "CLOAKBROWSER_LICENSE_KEY", Group: "插件", Description: "CloakBrowser Pro 许可证密钥，留空则使用免费版。", Secret: true, Reload: "plugin", Service: "plugin-cloakbrowser"},
 }
 
 var definitionByName = func() map[string]settingDefinition {
@@ -144,6 +151,8 @@ func main() {
 		allowUnauthenticated: os.Getenv("ENV_MANAGER_ALLOW_UNAUTHENTICATED") == "true",
 		s6SvcBin:             envOrDefault("ENV_MANAGER_S6_SVC_BIN", "/command/s6-svc"),
 		reloadTailscaleBin:   envOrDefault("ENV_MANAGER_RELOAD_TAILSCALE_BIN", "/usr/local/bin/reload-tailscale"),
+		configureNginxBin:    envOrDefault("ENV_MANAGER_CONFIGURE_NGINX_BIN", "/etc/s6-overlay/scripts/configure-nginx"),
+		nginxBin:             envOrDefault("ENV_MANAGER_NGINX_BIN", "/usr/sbin/nginx"),
 		overrides:            overrides,
 	}
 
@@ -317,6 +326,7 @@ func (m *manager) effectiveValue(definition settingDefinition) (string, string) 
 
 func (m *manager) reloadChanged(before, after map[string]string, changed map[string]bool) []reloadResult {
 	codeChanged, tailscaleChanged, managerChanged, restartRequired := false, false, false, false
+	pluginServices := make(map[string]bool)
 	for name := range changed {
 		definition := definitionByName[name]
 		if m.effectiveFrom(before, definition) == m.effectiveFrom(after, definition) {
@@ -329,11 +339,15 @@ func (m *manager) reloadChanged(before, after map[string]string, changed map[str
 			tailscaleChanged = true
 		case "manager":
 			managerChanged = true
+		case "plugin":
+			if definition.Service != "" {
+				pluginServices[definition.Service] = true
+			}
 		default:
 			restartRequired = true
 		}
 	}
-	results := make([]reloadResult, 0, 3)
+	results := make([]reloadResult, 0, 4)
 	if codeChanged {
 		if err := runCommand(m.s6SvcBin, "-r", "/run/service/code-server"); err != nil {
 			results = append(results, reloadResult{Service: "code-server", Status: "error", Message: err.Error()})
@@ -351,6 +365,29 @@ func (m *manager) reloadChanged(before, after map[string]string, changed map[str
 	if managerChanged {
 		results = append(results, reloadResult{Service: "env-manager", Status: "reloaded"})
 	}
+	if len(pluginServices) > 0 {
+		// A plugin's ENABLE var (or other Reload:"plugin" setting) may also
+		// add/remove its nginx route, so regenerate and hot-reload nginx
+		// alongside restarting the plugin's own s6 service -- the same two
+		// steps cmd/manager's certificate flow already uses.
+		serviceNames := make([]string, 0, len(pluginServices))
+		for service := range pluginServices {
+			serviceNames = append(serviceNames, service)
+		}
+		sort.Strings(serviceNames)
+		for _, service := range serviceNames {
+			if err := runCommand(m.s6SvcBin, "-r", "/run/service/"+service); err != nil {
+				results = append(results, reloadResult{Service: service, Status: "error", Message: err.Error()})
+			} else {
+				results = append(results, reloadResult{Service: service, Status: "reloaded"})
+			}
+		}
+		if err := m.applyNginx(); err != nil {
+			results = append(results, reloadResult{Service: "nginx", Status: "error", Message: err.Error()})
+		} else {
+			results = append(results, reloadResult{Service: "nginx", Status: "reloaded"})
+		}
+	}
 	if restartRequired {
 		results = append(results, reloadResult{Service: "container", Status: "restart_required", Message: "部分变量只能在容器重启后生效。"})
 	}
@@ -358,6 +395,40 @@ func (m *manager) reloadChanged(before, after map[string]string, changed map[str
 		results = append(results, reloadResult{Service: "configuration", Status: "saved"})
 	}
 	return results
+}
+
+// applyNginx regenerates and hot-reloads nginx. configure-nginx doesn't
+// source load-managed-env the way toggleable services' run scripts do, and
+// this process's own os.Environ() is frozen at container boot, so a plugin
+// enable var saved through the panel wouldn't otherwise reach it -- explicit
+// env overrides are threaded through instead. Caller must hold m.mu.
+func (m *manager) applyNginx() error {
+	if err := runCommandWithEnv(mergeEnv(os.Environ(), m.overrides), m.configureNginxBin); err != nil {
+		return err
+	}
+	return runCommand(m.nginxBin, "-s", "reload", "-c", "/run/nginx/nginx.conf")
+}
+
+func mergeEnv(base []string, overrides map[string]string) []string {
+	if len(overrides) == 0 {
+		return base
+	}
+	skip := make(map[string]bool, len(overrides))
+	for name := range overrides {
+		skip[name] = true
+	}
+	result := make([]string, 0, len(base)+len(overrides))
+	for _, entry := range base {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok && skip[name] {
+			continue
+		}
+		result = append(result, entry)
+	}
+	for name, value := range overrides {
+		result = append(result, name+"="+value)
+	}
+	return result
 }
 
 func (m *manager) effectiveFrom(overrides map[string]string, definition settingDefinition) string {
@@ -424,7 +495,7 @@ func validateValue(definition settingDefinition, value string) error {
 		if err != nil || portNumber < 1 || portNumber > 65535 {
 			return errors.New("端口必须在 1-65535 之间")
 		}
-	case "CODE_SERVER_AUTH", "TS_ENABLE", "TS_AUTH_ONCE", "TS_ACCEPT_DNS":
+	case "CODE_SERVER_AUTH", "TS_ENABLE", "TS_AUTH_ONCE", "TS_ACCEPT_DNS", "PLUGIN_FRPC_ENABLE", "PLUGIN_CLOAKBROWSER_ENABLE":
 		if definition.Name == "CODE_SERVER_AUTH" {
 			if value != "password" && value != "none" {
 				return errors.New("只能是 password 或 none")
@@ -585,7 +656,19 @@ func envOrDefault(name, fallback string) string {
 func runCommand(name string, arguments ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, name, arguments...).CombinedOutput()
+	return runCommandContext(exec.CommandContext(ctx, name, arguments...))
+}
+
+func runCommandWithEnv(env []string, name string, arguments ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, arguments...)
+	cmd.Env = env
+	return runCommandContext(cmd)
+}
+
+func runCommandContext(cmd *exec.Cmd) error {
+	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
 	}

@@ -66,6 +66,28 @@ if [ -n "${NGINX_SERVICE_LINKS:-}" ]; then
     service_count="${#service_entries[@]}"
 fi
 
+# Plugin counts are derived generically from the registry (see
+# rootfs/etc/rabbit-plugins/registry.json) so a new plugin doesn't need a
+# named row here the way DIND/TAILSCALE do.
+plugin_registry_file="${PLUGIN_REGISTRY_FILE:-/etc/rabbit-plugins/registry.json}"
+plugin_total=0
+plugin_enabled=0
+plugin_web_enabled=0
+if [ -r "$plugin_registry_file" ]; then
+    while IFS=$'\t' read -r plugin_id plugin_enable_env plugin_web_path; do
+        [ -n "$plugin_id" ] || continue
+        plugin_total=$((plugin_total + 1))
+        enabled_value="${!plugin_enable_env:-false}"
+        if [ "$enabled_value" = true ]; then
+            plugin_enabled=$((plugin_enabled + 1))
+            if [ -n "$plugin_web_path" ] && [ "$plugin_web_path" != "null" ]; then
+                plugin_web_enabled=$((plugin_web_enabled + 1))
+            fi
+        fi
+    done < <(jq -r '.[] | [.id, .enable_env, (.web_path // "null")] | @tsv' "$plugin_registry_file" 2>/dev/null)
+fi
+service_count=$((service_count + plugin_web_enabled))
+
 printf '%b\n' "${accent}+------------------------------------------------------------+${reset}"
 printf '%b\n' "${accent}|${reset}  ${bold}RABBIT DEV CONTAINER 🐇${reset}  ${muted}:: REMOTE DEV GATEWAY${reset}"
 printf '%b\n' "${accent}|${reset}  ${muted}boot sequence initialized${reset}"
@@ -76,4 +98,5 @@ row "DNS       ${dns_entry}"
 row "WORKSPACE /workspace"
 row "SERVICES  ${service_count} custom route(s)  |  SSHFS/rclone ready"
 row "DIND      $(feature_status "${DOCKERD_ROOTLESS_ENABLE:-false}")  |  TAILSCALE $(feature_status "${TS_ENABLE:-false}")"
+row "PLUGINS   ${plugin_enabled}/${plugin_total} enabled"
 printf '%b\n' "${accent}+------------------------------------------------------------+${reset}"

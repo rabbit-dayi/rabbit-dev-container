@@ -212,11 +212,18 @@ docker run --rm -i --entrypoint /bin/bash -e EXPECT_CUDA="$expect_cuda" "$image"
     printf "%s\n" \
         "#!/bin/bash" \
         "trap \"exit 0\" TERM INT" \
-        "printf \"https://smoke-test.trycloudflare.com\\n\" >&2" \
+        "printf '%s\\n' \"\$*\" >> \"\$ARGV_LOG\"" \
+        "url_target=\"\"" \
+        "for ((i=1; i<=\$#; i++)); do" \
+        "    if [ \"\${!i}\" = \"--url\" ]; then j=\$((i+1)); url_target=\"\${!j}\"; fi" \
+        "done" \
+        "slug=\"\$(printf '%s' \"\$url_target\" | md5sum | cut -c1-10)\"" \
+        "printf \"https://%s.trycloudflare.com\\n\" \"\$slug\" >&2" \
         "while :; do sleep 1; done" \
         >"$tunnel_test_dir/cloudflared"
     chmod 755 "$tunnel_test_dir/cloudflared"
     CLOUDFLARED_BIN="$tunnel_test_dir/cloudflared" \
+        ARGV_LOG="$tunnel_test_dir/argv.log" \
         RESOLV_WEB_PORT=18787 \
         RESOLV_STATE_FILE="$tunnel_test_dir/resolver.json" \
         node /usr/local/bin/resolver-web.js >"$tunnel_test_dir/first.log" 2>&1 &
@@ -225,32 +232,143 @@ docker run --rm -i --entrypoint /bin/bash -e EXPECT_CUDA="$expect_cuda" "$image"
         curl -fsS http://127.0.0.1:18787/api/tunnel >/dev/null 2>&1 && break
         sleep 0.1
     done
-    tunnel_result="$(curl -fsS -X POST \
+
+    # Two concurrent tunnels to distinct targets must both come up, each with
+    # its own PID -- this used to be impossible (single global tunnel slot).
+    tunnel_a="$(curl -fsS -X POST \
         -H "Content-Type: application/json" \
         --data "{\"target\":\"127.0.0.1:8080\"}" \
         http://127.0.0.1:18787/api/tunnel/start)"
-    tunnel_pid="$(printf "%s\n" "$tunnel_result" | jq -r .pid)"
-    kill -0 "$tunnel_pid"
+    tunnel_b="$(curl -fsS -X POST \
+        -H "Content-Type: application/json" \
+        --data "{\"target\":\"127.0.0.1:9090\"}" \
+        http://127.0.0.1:18787/api/tunnel/start)"
+    tunnel_a_id="$(printf "%s\n" "$tunnel_a" | jq -r .id)"
+    tunnel_a_pid="$(printf "%s\n" "$tunnel_a" | jq -r .pid)"
+    tunnel_b_pid="$(printf "%s\n" "$tunnel_b" | jq -r .pid)"
+    [ "$tunnel_a_pid" != "$tunnel_b_pid" ]
+    kill -0 "$tunnel_a_pid"
+    kill -0 "$tunnel_b_pid"
+    curl -fsS http://127.0.0.1:18787/api/tunnel | jq -e ".tunnels | length == 2" >/dev/null
+
+    # cloudflared defaults to QUIC, which needs outbound UDP that many
+    # container/firewall setups block; the fix pins --protocol http2.
+    grep -Fq -- "--protocol http2" "$tunnel_test_dir/argv.log"
+
+    # Stopping one tunnel by id must not disturb the other.
+    curl -fsS -X POST -H "Content-Type: application/json" \
+        --data "{\"id\":\"$tunnel_a_id\"}" \
+        http://127.0.0.1:18787/api/tunnel/stop >/dev/null
+    curl -fsS http://127.0.0.1:18787/api/tunnel | jq -e ".tunnels | length == 1" >/dev/null
+    kill -0 "$tunnel_b_pid"
+    ! kill -0 "$tunnel_a_pid" 2>/dev/null
+
+    # A resolver-web crash must not kill the orphaned cloudflared child, and
+    # the next startup must reap it via its PID file.
     kill -KILL "$resolver_pid"
     wait "$resolver_pid" 2>/dev/null || true
-    kill -0 "$tunnel_pid"
+    kill -0 "$tunnel_b_pid"
     CLOUDFLARED_BIN="$tunnel_test_dir/cloudflared" \
+        ARGV_LOG="$tunnel_test_dir/argv.log" \
         RESOLV_WEB_PORT=18787 \
         RESOLV_STATE_FILE="$tunnel_test_dir/resolver.json" \
         node /usr/local/bin/resolver-web.js >"$tunnel_test_dir/second.log" 2>&1 &
     resolver_pid=$!
     for _ in $(seq 1 60); do
         if curl -fsS http://127.0.0.1:18787/api/tunnel 2>/dev/null \
-            | jq -e ".running == false" >/dev/null 2>&1; then
+            | jq -e ".tunnels | length == 0" >/dev/null 2>&1; then
             break
         fi
         sleep 0.1
     done
-    curl -fsS http://127.0.0.1:18787/api/tunnel | jq -e ".running == false" >/dev/null
-    ! kill -0 "$tunnel_pid" 2>/dev/null
+    curl -fsS http://127.0.0.1:18787/api/tunnel | jq -e ".tunnels | length == 0" >/dev/null
+    ! kill -0 "$tunnel_b_pid" 2>/dev/null
     kill -TERM "$resolver_pid"
     wait "$resolver_pid"
     rm -rf "$tunnel_test_dir"
+
+    # Plugin: frpc must idle (no crash loop) both when disabled and when
+    # enabled but its config file is still missing.
+    env -u PLUGIN_FRPC_ENABLE /etc/s6-overlay/s6-rc.d/plugin-frpc/run &
+    frpc_idle_pid=$!
+    sleep 1
+    kill -0 "$frpc_idle_pid"
+    kill -TERM "$frpc_idle_pid"
+    wait "$frpc_idle_pid" 2>/dev/null || true
+
+    PLUGIN_FRPC_ENABLE=true /etc/s6-overlay/s6-rc.d/plugin-frpc/run &
+    frpc_no_config_pid=$!
+    sleep 1
+    kill -0 "$frpc_no_config_pid"
+    kill -TERM "$frpc_no_config_pid"
+    wait "$frpc_no_config_pid" 2>/dev/null || true
+
+    # Once enabled with a config file present, it execs the configured
+    # binary with -c <config path>.
+    frpc_test_dir="$(mktemp -d)"
+    printf 'serverAddr = "127.0.0.1"\nserverPort = 1\n' >"$frpc_test_dir/frpc.toml"
+    printf "%s\n" \
+        "#!/bin/bash" \
+        "printf '%s\\n' \"\$*\" >\"$frpc_test_dir/argv\"" \
+        "trap \"exit 0\" TERM INT" \
+        "while :; do sleep 1; done" \
+        >"$frpc_test_dir/frpc"
+    chmod 755 "$frpc_test_dir/frpc"
+    PLUGIN_FRPC_ENABLE=true \
+        PLUGIN_FRPC_CONFIG="$frpc_test_dir/frpc.toml" \
+        PLUGIN_FRPC_BIN="$frpc_test_dir/frpc" \
+        /etc/s6-overlay/s6-rc.d/plugin-frpc/run &
+    frpc_run_pid=$!
+    for _ in $(seq 1 30); do
+        [ -r "$frpc_test_dir/argv" ] && break
+        sleep 0.1
+    done
+    grep -Fq -- "-c $frpc_test_dir/frpc.toml" "$frpc_test_dir/argv"
+    kill -TERM "$frpc_run_pid"
+    wait "$frpc_run_pid" 2>/dev/null || true
+    rm -rf "$frpc_test_dir"
+
+    # Plugin: CloakBrowser-Manager must idle (no crash loop) when disabled
+    # and when enabled without its required rootless-DinD precondition. The
+    # real docker-run path needs a live rootless dockerd and a network pull
+    # of the vendor's image, which isn't suitable for this smoke test -- the
+    # rootless-DinD scenario later in this script already exercises dockerd
+    # itself.
+    env -u PLUGIN_CLOAKBROWSER_ENABLE /etc/s6-overlay/s6-rc.d/plugin-cloakbrowser/run &
+    cloakbrowser_idle_pid=$!
+    sleep 1
+    kill -0 "$cloakbrowser_idle_pid"
+    kill -TERM "$cloakbrowser_idle_pid"
+    wait "$cloakbrowser_idle_pid" 2>/dev/null || true
+
+    env -u DOCKERD_ROOTLESS_ENABLE PLUGIN_CLOAKBROWSER_ENABLE=true \
+        /etc/s6-overlay/s6-rc.d/plugin-cloakbrowser/run &
+    cloakbrowser_no_dind_pid=$!
+    sleep 1
+    kill -0 "$cloakbrowser_no_dind_pid"
+    kill -TERM "$cloakbrowser_no_dind_pid"
+    wait "$cloakbrowser_no_dind_pid" 2>/dev/null || true
+
+    # Registry-driven wiring: both plugins are listed, and configure-nginx /
+    # update-status / docker-image-banner all pick up an enabled plugin's web
+    # route without any code specific to it.
+    jq -e '[.[] | .id] == ["frpc", "cloakbrowser"]' /etc/rabbit-plugins/registry.json >/dev/null
+    PLUGIN_CLOAKBROWSER_ENABLE=true /etc/s6-overlay/scripts/configure-nginx
+    nginx -t -q -c /run/nginx/nginx.conf
+    grep -Fq "location ^~ /plugins/cloakbrowser/" /run/nginx/nginx.conf
+    grep -Fq "proxy_pass http://127.0.0.1:18180/;" /run/nginx/nginx.conf
+    grep -Fq 'href="/plugins/cloakbrowser/"' /run/nginx/services/index.html
+    STATUS_ONCE=true PLUGIN_CLOAKBROWSER_ENABLE=true /usr/local/bin/update-status
+    jq -e '.services[] | select(.path == "/plugins/cloakbrowser")' \
+        /run/nginx/status/status.json >/dev/null
+    STATUS_ONCE=true PLUGIN_FRPC_ENABLE=true /usr/local/bin/update-status
+    jq -e '.components.plugin_frpc == "down"' /run/nginx/status/status.json >/dev/null
+    STATUS_ONCE=true /usr/local/bin/update-status
+    jq -e '.components.plugin_frpc == "disabled"' /run/nginx/status/status.json >/dev/null
+    NO_COLOR=1 PLUGIN_CLOAKBROWSER_ENABLE=true /usr/local/bin/docker-image-banner \
+        | grep -Eq 'PLUGINS +1/2 enabled'
+    # Reset nginx to its default config for the assertions that follow.
+    /etc/s6-overlay/scripts/configure-nginx
 
     NGINX_HTTP_PORT=8081 NGINX_HTTPS_PORT=8443 \
         /etc/s6-overlay/scripts/configure-nginx
@@ -555,7 +673,7 @@ tunnel_json="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/dns/api/tunnel")"
-printf '%s\n' "$tunnel_json" | jq -e '.running == false and .default_target == "http://127.0.0.1:8080"' >/dev/null
+printf '%s\n' "$tunnel_json" | jq -e '.tunnels == [] and .default_target == "http://127.0.0.1:8080"' >/dev/null
 tunnel_invalid="$(curl --noproxy '*' -skS -X POST \
     -u admin:smoke-secret \
     -H 'Content-Type: application/json' \

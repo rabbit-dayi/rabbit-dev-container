@@ -1,0 +1,28 @@
+[
+  {
+    "id": "frpc",
+    "name": "frpc",
+    "description": "fatedier/frp reverse-proxy client. Connects out to your own frps server to expose internal services; no inbound web UI of its own.",
+    "enable_env": "PLUGIN_FRPC_ENABLE",
+    "service": "plugin-frpc",
+    "requires": [],
+    "config_path": "/root/.rabbit_container/plugins/frpc/frpc.toml",
+    "process_name": "frpc",
+    "web_path": null,
+    "web_port": null,
+    "docs_url": "https://github.com/fatedier/frp"
+  },
+  {
+    "id": "cloakbrowser",
+    "name": "CloakBrowser-Manager",
+    "description": "Third-party stealth-Chromium profile manager (CloakHQ/CloakBrowser-Manager), run as its own container via rootless Docker-in-Docker. Opt-in; requires your own CloakBrowser account/license.",
+    "enable_env": "PLUGIN_CLOAKBROWSER_ENABLE",
+    "service": "plugin-cloakbrowser",
+    "requires": ["dockerd-rootless"],
+    "config_path": null,
+    "process_name": null,
+    "web_path": "/plugins/cloakbrowser",
+    "web_port": 18180,
+    "docs_url": "https://github.com/CloakHQ/CloakBrowser-Manager"
+  }
+]

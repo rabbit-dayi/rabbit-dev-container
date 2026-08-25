@@ -32,6 +32,39 @@ endpoint_state() {
 
 upstream="${NGINX_UPSTREAM:-127.0.0.1:8080}"
 service_links="${NGINX_SERVICE_LINKS:-}"
+plugin_registry_file="${PLUGIN_REGISTRY_FILE:-/etc/rabbit-plugins/registry.json}"
+
+# Plugin components/routes are derived generically from the registry (see
+# rootfs/etc/rabbit-plugins/registry.json) instead of being named here one by
+# one, the way ssh/nginx/dockerd/tailscale are -- adding a plugin doesn't
+# require touching this script.
+plugin_registry_rows() {
+    [ -r "$plugin_registry_file" ] || return 0
+    jq -r '.[] | [.id, .enable_env, (.process_name // "null"), (.web_path // "null"), (.web_port // "null")] | @tsv' \
+        "$plugin_registry_file" 2>/dev/null || true
+}
+
+build_plugin_components_json() {
+    local components_json='{}'
+    local plugin_id plugin_enable_env plugin_process plugin_web_path plugin_web_port
+    local enabled_value plugin_state
+    while IFS=$'\t' read -r plugin_id plugin_enable_env plugin_process plugin_web_path plugin_web_port; do
+        [ -n "$plugin_id" ] || continue
+        [ -n "$plugin_process" ] && [ "$plugin_process" != "null" ] || continue
+        enabled_value="${!plugin_enable_env:-false}"
+        if [ "$enabled_value" = true ]; then
+            plugin_state="$(process_state "$plugin_process")"
+        else
+            plugin_state=disabled
+        fi
+        components_json="$(jq -cn \
+            --argjson components "$components_json" \
+            --arg key "plugin_${plugin_id}" \
+            --arg state "$plugin_state" \
+            '$components + {($key): $state}')"
+    done < <(plugin_registry_rows)
+    printf '%s\n' "$components_json"
+}
 
 build_services_json() {
     local services_json
@@ -64,6 +97,26 @@ build_services_json() {
                 '$services + [{name: $name, path: $path, endpoint: $endpoint, state: $state}]')"
         done
     fi
+
+    local plugin_id plugin_enable_env plugin_process plugin_web_path plugin_web_port
+    local enabled_value plugin_endpoint plugin_state
+    while IFS=$'\t' read -r plugin_id plugin_enable_env plugin_process plugin_web_path plugin_web_port; do
+        [ -n "$plugin_id" ] || continue
+        [ -n "$plugin_web_path" ] && [ "$plugin_web_path" != "null" ] || continue
+        [ -n "$plugin_web_port" ] && [ "$plugin_web_port" != "null" ] || continue
+        enabled_value="${!plugin_enable_env:-false}"
+        [ "$enabled_value" = true ] || continue
+        plugin_endpoint="127.0.0.1:${plugin_web_port}"
+        plugin_state="$(endpoint_state "$plugin_endpoint")"
+        services_json="$(jq -cn \
+            --argjson services "$services_json" \
+            --arg name "$plugin_id" \
+            --arg path "$plugin_web_path" \
+            --arg endpoint "$plugin_endpoint" \
+            --arg state "$plugin_state" \
+            '$services + [{name: $name, path: $path, endpoint: $endpoint, state: $state}]')"
+    done < <(plugin_registry_rows)
+
     printf '%s\n' "$services_json"
 }
 
@@ -77,6 +130,7 @@ write_status() {
     local dockerd_state
     local tailscale_state
     local services_json
+    local plugin_components_json
     local hostname_value
     local uptime_seconds
     local memory_total_kib
@@ -130,6 +184,7 @@ write_status() {
         tailscale_state="$(process_state tailscaled)"
     fi
     services_json="$(build_services_json)"
+    plugin_components_json="$(build_plugin_components_json)"
 
     payload="$(jq -cn \
         --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -148,7 +203,8 @@ write_status() {
         --arg dockerd "$dockerd_state" \
         --arg tailscale "$tailscale_state" \
         --argjson services "$services_json" \
-        '{generated_at: $generated_at, hostname: $hostname, uptime_seconds: $uptime_seconds, workspace_usage: $workspace_usage, memory_used_bytes: $memory_used_bytes, memory_total_bytes: $memory_total_bytes, memory_usage_percent: $memory_usage_percent, load_average: $load_average, fuse_mounts: $fuse_mounts, sshfs_mounts: $sshfs_mounts, components: {ssh: $ssh, code_server: $code_server, nginx: $nginx, dockerd: $dockerd, tailscale: $tailscale}, services: $services}')"
+        --argjson plugin_components "$plugin_components_json" \
+        '{generated_at: $generated_at, hostname: $hostname, uptime_seconds: $uptime_seconds, workspace_usage: $workspace_usage, memory_used_bytes: $memory_used_bytes, memory_total_bytes: $memory_total_bytes, memory_usage_percent: $memory_usage_percent, load_average: $load_average, fuse_mounts: $fuse_mounts, sshfs_mounts: $sshfs_mounts, components: ({ssh: $ssh, code_server: $code_server, nginx: $nginx, dockerd: $dockerd, tailscale: $tailscale} + $plugin_components), services: $services}')"
     install -d -m 0755 "$status_dir"
     tmp_file="$(mktemp "${status_file}.XXXXXX")"
     printf '%s\n' "$payload" >"$tmp_file"

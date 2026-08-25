@@ -7,6 +7,7 @@
 - `code-server`：在浏览器中使用 VS Code
 - `Nginx`：统一 HTTPS Web 入口，默认将 HTTP 重定向到 HTTPS，并提供运行状态、DNS 和证书管理页面
 - `Tailscale`：可选的容器内 tailnet 接入服务
+- 插件：由 s6 直接监督的可选附加服务，默认内置 `frpc`（反向代理客户端）和 CloakBrowser-Manager（第三方，需自备账号）两个插件，均默认关闭
 - `Docker CLI`、Buildx、Compose plugin，以及可选的 rootless Docker-in-Docker daemon
 - CUDA 镜像：包含 `nvcc`、CUDA 开发库和 `cuda-gdb`，不捆绑 GUI profiler；镜像不包含 NVIDIA 驱动
 - `uv`：Python 包管理/运行工具
@@ -136,6 +137,12 @@ PASSWORD='change-this-password' docker compose \
 
 管理页优先使用 `RESOLV_WEB_PASSWORD` 生成 Nginx Basic Auth；未设置时使用已有的 `PASSWORD`。如果两者都没有，页面和 API 默认完全关闭。只在受信任网络内临时测试时，才应显式设置 `RESOLV_WEB_ALLOW_UNAUTHENTICATED=true` 跳过认证。
 
+### Cloudflare 临时隧道
+
+`/dns/` 页面同一位置提供 Cloudflare 临时隧道（`cloudflared tunnel --url`），把容器内任意 `host:port` 临时映射到一个随机的 `*.trycloudflare.com` 地址，用于快速对外测试。每个内部地址各自对应一条独立隧道，可以同时新建多条；停止或容器重启后地址不会保留，也不写入持久化配置。
+
+隧道默认使用 `--protocol http2`，而不是 cloudflared 自身默认的 QUIC：QUIC 依赖出站 UDP，在容器网络或防火墙环境中经常被限制或不稳定，是隧道“偶尔连接失败”的常见原因；HTTP/2（TCP）在这类环境下更可靠。需要时可通过 `CLOUDFLARED_PROTOCOL` 覆盖为 `quic` 或 `auto`。启动隧道最多重试 3 次，每次等待 15 秒获取公网地址，失败或断开会明确标记在页面上，不会静默保留过期状态。
+
 ## 镜像地址
 
 ```text
@@ -225,7 +232,7 @@ ports:
 
 ### 证书管理页
 
-设置 `PASSWORD` 后访问 `https://<域名>/manage/`，可以查看当前证书的域名、签发者、有效期和指纹，并上传新的证书链和未加密私钥。上传后会在 `/root/.rabbit_container/tls/versions/` 保存版本，原子切换 `current` 链接并热加载 Nginx；如果校验或热加载失败，会自动恢复上一版。通过 `NGINX_TLS_CERT_FILE`/`NGINX_TLS_KEY_FILE` 或 `/etc/nginx/certs` 提供的证书属于外部托管，只读展示，不允许页面覆盖。证书文件上传和管理接口默认只在统一 Nginx 登录后可见。
+设置 `PASSWORD` 后访问 `https://<域名>/manage/`，可以查看当前证书的域名、签发者、有效期和指纹，并上传新的证书链和未加密私钥。上传后会在 `/root/.rabbit_container/tls/versions/` 保存版本，原子切换 `current` 链接并热加载 Nginx；如果校验或热加载失败，会自动恢复上一版。通过 `NGINX_TLS_CERT_FILE`/`NGINX_TLS_KEY_FILE` 或 `/etc/nginx/certs` 提供的证书属于外部托管，只读展示，不允许页面覆盖。证书文件上传和管理接口默认只在统一 Nginx 登录后可见。同一页面下方还有一个只读的“插件”目录，列出已注册插件及其当前运行状态，详见下方[插件](#插件)一节。
 
 ### TLS 证书
 
@@ -324,6 +331,24 @@ volumes:
 ```
 
 启用前，宿主机必须允许非特权 user namespace；服务启动时还会检查 `/dev/fuse`。条件不满足时 rootless `dockerd` 会保持 idle，SSH 和 code-server 不受影响。rootless Docker 的已知限制仍然适用，例如默认不能发布低于 1024 的端口，且没有 systemd/cgroup v2 委派时部分容器级资源限制不会生效。
+
+## 插件
+
+插件是构建时打包进镜像、运行时通过 `PLUGIN_<NAME>_ENABLE` 开关启用的可选附加服务，沿用 Tailscale（`TS_ENABLE`）和 rootless Docker-in-Docker（`DOCKERD_ROOTLESS_ENABLE`）已有的约定：由 s6 直接监督对应进程（自动重启、干净退出、不会因为被禁用而反复崩溃重启），没有运行时安装任意代码的机制，因此每个插件都能在镜像构建时被审查。带 Web UI 的插件会像 `NGINX_SERVICE_LINKS` 里的自定义服务一样，自动出现在 `/services/` 门户、`/status.json` 和启动横幅中。
+
+开关状态可以在 `/env/` 环境变量管理面板中修改（保存后只重启该插件自身的服务并热加载 Nginx，不需要重启整个容器），也可以在启动容器时通过 `-e PLUGIN_<NAME>_ENABLE=true` 直接设置。`/manage/` 页面下方的插件目录展示每个已注册插件的说明、依赖和当前运行状态（只读，实际开关仍在 `/env/`）。
+
+新增插件的约定、模板和生成脚本见仓库内的 [`plugins/README.md`](plugins/README.md)（`scripts/new-plugin.sh <id>` 可以直接生成骨架），本节只说明已经内置的两个插件。
+
+### frpc
+
+[fatedier/frp](https://github.com/fatedier/frp) 的客户端 `frpc`，用于把容器内服务反向代理到你自己的 `frps` 服务端；本身没有 Web UI。二进制在镜像构建时按固定版本和 SHA-256 校验下载。设置 `PLUGIN_FRPC_ENABLE=true` 并把配置文件放到 `PLUGIN_FRPC_CONFIG`（默认 `/root/.rabbit_container/plugins/frpc/frpc.toml`）后即可启用；持久化 `/root` 后配置会跨容器重建保留。配置文件不存在时插件保持 idle 并在日志中提示，不会反复崩溃重启。
+
+### CloakBrowser-Manager（第三方，默认关闭）
+
+[CloakHQ/CloakBrowser-Manager](https://github.com/CloakHQ/CloakBrowser-Manager) 是一个第三方的隔离浏览器配置文件管理工具，不由本项目维护；启用即表示你已了解并同意该项目自己的条款，并自备账号/许可证。插件以官方 `cloakhq/cloakbrowser-manager` 镜像原样运行，不做任何修改。
+
+启用需要先打开 rootless Docker-in-Docker（`DOCKERD_ROOTLESS_ENABLE=true`），再设置 `PLUGIN_CLOAKBROWSER_ENABLE=true`；插件会等待内层 `dockerd` 的 socket 就绪后，以前台方式启动容器，由 s6 直接监督（容器异常退出会被重新拉起，与 tailscaled、dockerd-rootless 相同）。任一前置条件不满足时插件保持 idle 并给出明确提示。默认通过 `127.0.0.1:${PLUGIN_CLOAKBROWSER_PORT:-18180}` 暴露，并在 Nginx 中代理到 `/plugins/cloakbrowser/`；可选的 `CLOAKBROWSER_LICENSE_KEY` 用于 Pro 版许可证，留空则使用免费版。
 
 ## 访问方式
 
@@ -493,6 +518,7 @@ docker exec -it rabbit-dev-container tailscale \
 | `RESOLV_FALLBACK_NAMESERVER` | `1.1.1.1` | 公共 DNS 备用 IPv4 地址，探测端口固定为 `53`。 |
 | `RESOLV_FALLBACK_ALWAYS` | `false` | 本地 DNS 未响应时，是否仍探测并添加备用 DNS。 |
 | `RESOLV_CHECK_DOMAIN` | `example.com` | DNS 探测使用的域名。 |
+| `CLOUDFLARED_PROTOCOL` | `http2` | 临时隧道使用的 cloudflared 传输协议；可选 `quic` 或 `auto`，默认 `http2` 以避免 QUIC 所需的出站 UDP 在部分网络中被限制。 |
 | `NGINX_TLS_CERT_FILE` | 未设置 | 自定义证书绝对路径；必须与 `NGINX_TLS_KEY_FILE` 一同设置。 |
 | `NGINX_TLS_KEY_FILE` | 未设置 | 自定义未加密私钥绝对路径；必须与 `NGINX_TLS_CERT_FILE` 一同设置。 |
 | `ENV_MANAGER_ENABLE` | `true` | 是否启用 `/env/` 环境变量管理面板。 |
@@ -517,6 +543,11 @@ docker exec -it rabbit-dev-container tailscale \
 | `MANAGER_PORT` | `8788` | Go 证书管理 API 仅监听容器内 `127.0.0.1` 的端口。 |
 | `MANAGER_CONFIG_DIR` | `/root/.rabbit_container` | 证书版本和其他管理配置的持久化根目录。 |
 | `DOCKER_HOST` | `unix:///run/user/1000/docker.sock` | 镜像内 Docker CLI 默认连接的 rootless daemon socket。 |
+| `PLUGIN_FRPC_ENABLE` | `false` | 严格设为 `true` 才启用 frpc 插件。 |
+| `PLUGIN_FRPC_CONFIG` | `/root/.rabbit_container/plugins/frpc/frpc.toml` | frpc 配置文件路径；不存在时插件保持 idle。 |
+| `PLUGIN_CLOAKBROWSER_ENABLE` | `false` | 严格设为 `true` 才启用 CloakBrowser-Manager 插件（第三方组件）；需要先启用 `DOCKERD_ROOTLESS_ENABLE`。 |
+| `PLUGIN_CLOAKBROWSER_PORT` | `18180` | CloakBrowser-Manager Web UI 在容器内 `127.0.0.1` 监听的端口。 |
+| `CLOAKBROWSER_LICENSE_KEY` | 未设置 | CloakBrowser Pro 许可证密钥，留空则使用免费版。 |
 | `STARTUP_BANNER` | `true` | 是否在容器初始化日志中显示启动横幅。 |
 | `STARTUP_SELF_CHECK` | `true` | 是否在服务启动后执行只读自检并输出到容器日志。 |
 | `STARTUP_CHECK_TIMEOUT` | `20` | 自检等待核心服务就绪的秒数，允许 1–120。 |

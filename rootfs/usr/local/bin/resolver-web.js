@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const net = require('node:net');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { Resolver } = require('node:dns').promises;
 
@@ -12,8 +13,19 @@ const stateFile = process.env.RESOLV_STATE_FILE || '/root/.rabbit_container/reso
 const port = Number.parseInt(process.env.RESOLV_WEB_PORT || '8787', 10);
 const cloudflaredBin = process.env.CLOUDFLARED_BIN || 'cloudflared';
 const tunnelRuntimeDir = '/run/cloudflared';
-const tunnelPidFile = path.join(tunnelRuntimeDir, 'quick-tunnel.pid');
 const tunnelDefaultTarget = process.env.NGINX_UPSTREAM || '127.0.0.1:8080';
+const tunnelStartTimeoutMs = 15000;
+const tunnelMaxStartAttempts = 3;
+const tunnelRetryDelayMs = 1000;
+const cloudflaredProtocol = (() => {
+  const allowed = ['http2', 'quic', 'auto'];
+  const value = process.env.CLOUDFLARED_PROTOCOL || 'http2';
+  if (!allowed.includes(value)) {
+    console.warn(`[resolver-web] Invalid CLOUDFLARED_PROTOCOL "${value}"; falling back to http2.`);
+    return 'http2';
+  }
+  return value;
+})();
 const defaults = {
   auto_config: true,
   local_nameserver: '127.0.0.1',
@@ -211,42 +223,61 @@ function applyConfig(config) {
   });
 }
 
-let tunnelProcess = null;
-let tunnelStopRequested = false;
-let tunnelState = {
-  url: null,
-  target: null,
-  started_at: null,
-  last_error: null,
-  output_tail: '',
-};
+// --- Cloudflare quick tunnels -------------------------------------------------
+//
+// Multiple tunnels (one per distinct target) can run concurrently; each is
+// tracked in `tunnels`, keyed by its normalized target so re-requesting the
+// same target reuses/replaces the same slot instead of colliding.
+const tunnels = new Map();
 
-function readTunnelPid() {
+function tunnelId(target) {
+  return crypto.createHash('sha1').update(target).digest('hex').slice(0, 12);
+}
+
+function createTunnelHandle(target) {
+  return {
+    id: tunnelId(target),
+    target,
+    process: null,
+    url: null,
+    started_at: null,
+    last_error: null,
+    output_tail: '',
+    crashed: false,
+    stopRequested: false,
+  };
+}
+
+function pidFilePath(id) {
+  return path.join(tunnelRuntimeDir, `${id}.pid`);
+}
+
+function readTunnelPid(id) {
   try {
-    const value = Number.parseInt(fs.readFileSync(tunnelPidFile, 'utf8').trim(), 10);
+    const value = Number.parseInt(fs.readFileSync(pidFilePath(id), 'utf8').trim(), 10);
     return Number.isInteger(value) && value > 1 ? value : null;
   } catch {
     return null;
   }
 }
 
-function writeTunnelPid(pid) {
+function writeTunnelPid(id, pid) {
   if (!Number.isInteger(pid) || pid <= 1) throw new Error('cloudflared did not return a valid process ID');
   fs.mkdirSync(tunnelRuntimeDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(tunnelRuntimeDir, 0o700);
-  const temporary = `${tunnelPidFile}.${process.pid}.tmp`;
+  const temporary = `${pidFilePath(id)}.${process.pid}.tmp`;
   try {
     fs.writeFileSync(temporary, `${pid}\n`, { mode: 0o600 });
-    fs.renameSync(temporary, tunnelPidFile);
+    fs.renameSync(temporary, pidFilePath(id));
   } catch (error) {
     try { fs.unlinkSync(temporary); } catch {}
     throw error;
   }
 }
 
-function clearTunnelPid(expectedPid) {
-  if (expectedPid && readTunnelPid() !== expectedPid) return;
-  try { fs.unlinkSync(tunnelPidFile); } catch (error) {
+function clearTunnelPid(id, expectedPid) {
+  if (expectedPid && readTunnelPid(id) !== expectedPid) return;
+  try { fs.unlinkSync(pidFilePath(id)); } catch (error) {
     if (error.code !== 'ENOENT') console.warn(`[resolver-web] Could not remove tunnel PID file: ${error.message}`);
   }
 }
@@ -289,14 +320,14 @@ async function waitForProcessExit(pid, attempts = 40) {
   return !processExists(pid);
 }
 
-async function terminateManagedTunnel(pid) {
+async function terminateManagedTunnel(id, pid) {
   if (!processExists(pid)) {
-    clearTunnelPid(pid);
+    clearTunnelPid(id, pid);
     return;
   }
   if (!isManagedTunnel(pid)) {
-    console.warn(`[resolver-web] Ignoring stale tunnel PID ${pid}: command does not match managed cloudflared.`);
-    clearTunnelPid(pid);
+    console.warn(`[resolver-web] Ignoring stale tunnel PID ${pid} (tunnel ${id}): command does not match managed cloudflared.`);
+    clearTunnelPid(id, pid);
     return;
   }
   try { process.kill(pid, 'SIGTERM'); } catch {}
@@ -304,17 +335,26 @@ async function terminateManagedTunnel(pid) {
     try { process.kill(pid, 'SIGKILL'); } catch {}
     await waitForProcessExit(pid, 20);
   }
-  clearTunnelPid(pid);
+  clearTunnelPid(id, pid);
 }
 
-async function cleanupStaleTunnel() {
-  const pid = readTunnelPid();
-  if (!pid) {
-    clearTunnelPid();
+async function cleanupStaleTunnels() {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(tunnelRuntimeDir).filter((name) => name.endsWith('.pid'));
+  } catch {
     return;
   }
-  console.warn(`[resolver-web] Cleaning up stale cloudflared process ${pid}.`);
-  await terminateManagedTunnel(pid);
+  for (const entry of entries) {
+    const id = entry.slice(0, -4);
+    const pid = readTunnelPid(id);
+    if (!pid) {
+      clearTunnelPid(id);
+      continue;
+    }
+    console.warn(`[resolver-web] Cleaning up stale cloudflared process ${pid} (tunnel ${id}).`);
+    await terminateManagedTunnel(id, pid);
+  }
 }
 
 function defaultTunnelTarget() {
@@ -330,112 +370,178 @@ function extractTunnelUrl(output) {
   return match ? match[0].replace(/[),.;]+$/, '') : null;
 }
 
-function tunnelOutput(chunk) {
-  tunnelState.output_tail = `${tunnelState.output_tail}${chunk}`.slice(-4096);
-  if (!tunnelState.url) {
-    const url = extractTunnelUrl(tunnelState.output_tail);
-    if (url) tunnelState.url = url;
+function tunnelOutput(handle, chunk) {
+  handle.output_tail = `${handle.output_tail}${chunk}`.slice(-4096);
+  if (!handle.url) {
+    const url = extractTunnelUrl(handle.output_tail);
+    if (url) handle.url = url;
   }
 }
 
-function publicTunnelState() {
-  const running = Boolean(tunnelProcess);
-  return {
-    running,
-    pid: running ? tunnelProcess.pid : null,
-    url: tunnelState.url,
-    target: tunnelState.target,
-    started_at: tunnelState.started_at,
-    last_error: tunnelState.last_error,
-    output_tail: running ? '' : tunnelState.output_tail,
-    default_target: defaultTunnelTarget(),
-  };
-}
-
-async function startTunnel(targetInput) {
-  if (tunnelProcess) throw new Error('a temporary tunnel is already running');
-  const target = normalizeTunnelTarget(targetInput || tunnelDefaultTarget);
-  fs.mkdirSync(tunnelRuntimeDir, { recursive: true, mode: 0o700 });
-  tunnelState = {
-    url: null,
-    target,
-    started_at: new Date().toISOString(),
-    last_error: null,
-    output_tail: '',
-  };
-  tunnelStopRequested = false;
-
-  let child;
-  try {
-    child = spawn(cloudflaredBin, ['tunnel', '--no-autoupdate', '--url', target], {
-      cwd: '/',
-      env: { ...process.env, HOME: tunnelRuntimeDir, XDG_CONFIG_HOME: tunnelRuntimeDir },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  } catch (error) {
-    tunnelState.last_error = error.message;
-    throw error;
-  }
-  tunnelProcess = child;
-  child.stdout.on('data', tunnelOutput);
-  child.stderr.on('data', tunnelOutput);
-  if (Number.isInteger(child.pid)) {
-    try {
-      writeTunnelPid(child.pid);
-    } catch (error) {
-      tunnelState.last_error = `could not record cloudflared process: ${error.message}`;
-      child.kill('SIGTERM');
-      tunnelProcess = null;
-      throw new Error(tunnelState.last_error);
+// Wires up permanent output/exit handling for a spawned cloudflared process.
+// Runs for the process's whole life, including after the initial start
+// succeeds, so an unexpected later death is recorded instead of leaving the
+// tunnel silently looking "running" from a client's point of view.
+function attachTunnelLifecycle(handle, child) {
+  child.stdout.on('data', (chunk) => tunnelOutput(handle, chunk));
+  child.stderr.on('data', (chunk) => tunnelOutput(handle, chunk));
+  child.once('exit', (code, signal) => {
+    if (handle.process !== child) return;
+    handle.process = null;
+    clearTunnelPid(handle.id, child.pid);
+    if (handle.stopRequested) {
+      handle.stopRequested = false;
+      return;
     }
-  }
+    handle.crashed = true;
+    handle.last_error = handle.url
+      ? `cloudflared exited unexpectedly (${signal || `code ${code}`})`
+      : `cloudflared exited before creating a tunnel (${signal || `code ${code}`})`;
+  });
+}
 
+function spawnCloudflared(handle) {
+  return spawn(cloudflaredBin, ['tunnel', '--no-autoupdate', '--protocol', cloudflaredProtocol, '--url', handle.target], {
+    cwd: '/',
+    env: { ...process.env, HOME: tunnelRuntimeDir, XDG_CONFIG_HOME: tunnelRuntimeDir },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function waitForUrlOrExit(handle, child, timeoutMs) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
+      clearTimeout(timer);
+      child.stdout.off('data', check);
+      child.stderr.off('data', check);
+      child.off('exit', onExit);
       if (error) reject(error);
-      else resolve(publicTunnelState());
+      else resolve();
     };
-    const timeout = setTimeout(() => {
-      tunnelState.last_error = 'cloudflared did not publish a trycloudflare.com URL within 10 seconds';
-      child.kill('SIGTERM');
-      finish(new Error(tunnelState.last_error));
-    }, 10000);
-    const checkUrl = () => {
-      if (tunnelState.url) finish();
-    };
-    child.stdout.on('data', checkUrl);
-    child.stderr.on('data', checkUrl);
-    child.once('error', (error) => {
-      tunnelState.last_error = error.message;
-      if (tunnelProcess === child) tunnelProcess = null;
-      clearTunnelPid(child.pid);
-      finish(error);
-    });
-    child.once('exit', (code, signal) => {
-      if (tunnelProcess === child) tunnelProcess = null;
-      clearTunnelPid(child.pid);
-      if (!tunnelState.url) {
-        tunnelState.last_error = `cloudflared exited before creating a tunnel (${signal || `code ${code}`})`;
-        finish(new Error(tunnelState.last_error));
-      } else if (code !== 0 && !tunnelState.last_error && !tunnelStopRequested) {
-        tunnelState.last_error = `cloudflared exited (${signal || `code ${code}`})`;
-      }
-    });
+    const check = () => { if (handle.url) finish(); };
+    const onExit = () => { if (!handle.url) finish(new Error(handle.last_error || 'cloudflared exited before creating a tunnel')); };
+    const timer = setTimeout(
+      () => finish(new Error('cloudflared did not publish a trycloudflare.com URL within the timeout')),
+      timeoutMs,
+    );
+    child.stdout.on('data', check);
+    child.stderr.on('data', check);
+    child.once('exit', onExit);
   });
 }
 
-async function stopTunnel() {
-  const child = tunnelProcess;
-  if (!child) return publicTunnelState();
-  tunnelStopRequested = true;
+function publicTunnelView(handle) {
+  const running = Boolean(handle.process);
+  return {
+    id: handle.id,
+    running,
+    crashed: handle.crashed,
+    pid: running ? handle.process.pid : null,
+    url: handle.url,
+    target: handle.target,
+    started_at: handle.started_at,
+    last_error: handle.last_error,
+    output_tail: running ? '' : handle.output_tail,
+  };
+}
+
+function publicTunnelsState() {
+  return {
+    tunnels: Array.from(tunnels.values()).map(publicTunnelView),
+    default_target: defaultTunnelTarget(),
+  };
+}
+
+function findTunnelHandle(identifier) {
+  if (!identifier) {
+    return tunnels.size === 1 ? tunnels.values().next().value : null;
+  }
+  for (const handle of tunnels.values()) {
+    if (handle.id === identifier || handle.target === identifier) return handle;
+  }
+  return null;
+}
+
+// Starting a tunnel retries a few times before giving up: cloudflared's
+// default QUIC transport needs outbound UDP, which many container/firewall
+// setups block or throttle inconsistently, and even with --protocol http2
+// edge assignment can be transiently slow. A single 10s attempt was reporting
+// "failed" for what was really just a slow retry.
+async function startTunnel(targetInput) {
+  const target = normalizeTunnelTarget(targetInput || tunnelDefaultTarget);
+  const existing = tunnels.get(target);
+  if (existing && existing.process) {
+    throw new Error('a tunnel to this target is already running');
+  }
+
+  const handle = createTunnelHandle(target);
+  tunnels.set(target, handle);
+
+  let lastError;
+  for (let attempt = 1; attempt <= tunnelMaxStartAttempts; attempt += 1) {
+    handle.url = null;
+    handle.output_tail = '';
+    handle.crashed = false;
+    handle.last_error = null;
+
+    let child;
+    try {
+      child = spawnCloudflared(handle);
+    } catch (error) {
+      lastError = error;
+      if (attempt < tunnelMaxStartAttempts) await delay(tunnelRetryDelayMs);
+      continue;
+    }
+    handle.process = child;
+    handle.started_at = new Date().toISOString();
+    attachTunnelLifecycle(handle, child);
+    if (Number.isInteger(child.pid)) {
+      try {
+        writeTunnelPid(handle.id, child.pid);
+      } catch (error) {
+        child.kill('SIGTERM');
+        handle.process = null;
+        lastError = error;
+        if (attempt < tunnelMaxStartAttempts) await delay(tunnelRetryDelayMs);
+        continue;
+      }
+    }
+
+    try {
+      await waitForUrlOrExit(handle, child, tunnelStartTimeoutMs);
+      return publicTunnelView(handle);
+    } catch (error) {
+      lastError = error;
+      if (handle.process === child) {
+        child.kill('SIGTERM');
+        handle.process = null;
+        clearTunnelPid(handle.id, child.pid);
+      }
+      if (attempt < tunnelMaxStartAttempts) await delay(tunnelRetryDelayMs);
+    }
+  }
+
+  handle.last_error = lastError ? lastError.message : 'could not start temporary tunnel';
+  handle.crashed = true;
+  throw new Error(handle.last_error);
+}
+
+async function stopTunnel(identifier) {
+  const handle = findTunnelHandle(identifier);
+  if (!handle) throw new Error('tunnel not found');
+  if (!handle.process) {
+    tunnels.delete(handle.target);
+    return { stopped: true, id: handle.id, target: handle.target, running: false };
+  }
+  const child = handle.process;
+  handle.stopRequested = true;
   child.kill('SIGTERM');
   await new Promise((resolve) => {
     const timer = setTimeout(() => {
-      if (tunnelProcess === child) child.kill('SIGKILL');
+      if (handle.process === child) child.kill('SIGKILL');
       resolve();
     }, 5000);
     child.once('exit', () => {
@@ -443,13 +549,15 @@ async function stopTunnel() {
       resolve();
     });
   });
-  if (tunnelProcess === child) tunnelProcess = null;
-  clearTunnelPid(child.pid);
-  tunnelState.url = null;
-  tunnelState.last_error = null;
-  tunnelState.output_tail = '';
-  tunnelStopRequested = false;
-  return publicTunnelState();
+  if (handle.process === child) handle.process = null;
+  clearTunnelPid(handle.id, child.pid);
+  tunnels.delete(handle.target);
+  return { stopped: true, id: handle.id, target: handle.target, running: false };
+}
+
+async function stopAllTunnels() {
+  const targets = Array.from(tunnels.keys());
+  await Promise.all(targets.map((target) => stopTunnel(target).catch(() => {})));
 }
 
 async function handle(request, response) {
@@ -465,14 +573,14 @@ async function handle(request, response) {
   }
 
   if (request.method === 'GET' && requestUrl.pathname === '/api/tunnel') {
-    writeJson(response, 200, publicTunnelState());
+    writeJson(response, 200, publicTunnelsState());
     return;
   }
 
   if (request.method === 'POST' && requestUrl.pathname === '/api/tunnel/start') {
     let body = {};
     try {
-      body = JSON.parse(await readBody(request));
+      body = JSON.parse((await readBody(request)) || '{}');
     } catch (error) {
       writeJson(response, 400, { error: error.message || 'invalid JSON' });
       return;
@@ -480,16 +588,23 @@ async function handle(request, response) {
     try {
       writeJson(response, 200, await startTunnel(body.target));
     } catch (error) {
-      writeJson(response, 400, { error: error.message || 'could not start temporary tunnel', state: publicTunnelState() });
+      writeJson(response, 400, { error: error.message || 'could not start temporary tunnel', state: publicTunnelsState() });
     }
     return;
   }
 
   if (request.method === 'POST' && requestUrl.pathname === '/api/tunnel/stop') {
+    let body = {};
     try {
-      writeJson(response, 200, { stopped: true, ...await stopTunnel() });
+      body = JSON.parse((await readBody(request)) || '{}');
     } catch (error) {
-      writeJson(response, 500, { error: error.message || 'could not stop temporary tunnel' });
+      writeJson(response, 400, { error: error.message || 'invalid JSON' });
+      return;
+    }
+    try {
+      writeJson(response, 200, await stopTunnel(body.id || body.target));
+    } catch (error) {
+      writeJson(response, 400, { error: error.message || 'could not stop temporary tunnel' });
     }
     return;
   }
@@ -552,14 +667,14 @@ let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
-  await stopTunnel();
+  await stopAllTunnels();
   server.close(() => process.exit(0));
 }
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 async function startServer() {
-  await cleanupStaleTunnel();
+  await cleanupStaleTunnels();
   server.listen(port, '127.0.0.1', () => {
     console.log(`[resolver-web] Listening on 127.0.0.1:${port}; state=${stateFile}`);
   });
